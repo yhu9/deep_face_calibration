@@ -18,11 +18,13 @@ import util
 class Data():
     def __init__(self,db='all'):
         self.dataloader = SyntheticLoader()
+        self.M = self.dataloader.M
+        self.N = self.dataloader.N
         self.mu_lm = self.dataloader.mu_lm
         self.mu_exp = self.dataloader.mu_exp
         self.lm_eigenvec = self.dataloader.lm_eigenvec
         self.exp_eigenvec = self.dataloader.exp_eigenvec
-        self.batchsize = 100
+        self.batchsize = 5
         self.shuffle = True
         self.transform = True
         self.batchloader = DataLoader(self.dataloader,
@@ -77,7 +79,7 @@ class SyntheticLoader(Dataset):
         self.xstd = 1; self.ystd = 1;
 
     def __len__(self):
-        return 1000
+        return 100
 
     def __getitem__(self,idx):
 
