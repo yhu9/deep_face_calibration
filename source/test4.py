@@ -8,13 +8,14 @@ import numpy as np
 
 from logger import Logger
 from model import PointNet
+from model import CalibrationNet2
 import dataloader
 import util
 
 ####################################################
 
 parser = argparse.ArgumentParser(description="training arguments")
-parser.add_argument("--model", default="model/model_ximgnoisy.pt")
+parser.add_argument("--model", default="")
 parser.add_argument("--out",default="results/exp.mat")
 args = parser.parse_args()
 
@@ -23,7 +24,7 @@ args = parser.parse_args()
 def test(modelin=args.model,outfile=args.out):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = PointNet(k=1+199, feature_transform=False)
+    model = CalibrationNet2()
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
     model.cuda()
@@ -61,9 +62,10 @@ def test(modelin=args.model,outfile=args.out):
             x_img_one = torch.cat([x_img,one],dim=1)
 
             # run the model
-            out, trans, transfeat = model(x_img_one)
-            alphas = out[:,:199].mean(0)
-            f = torch.relu(out[:,199]).mean()
+            batch_out,feat_loss = model(x_img_one)
+            out = batch_out.squeeze()
+            alphas = out[:199]
+            f = torch.relu(out[199])
             K = torch.zeros((3,3)).float().cuda()
             K[0,0] = f;
             K[1,1] = f;
@@ -90,7 +92,7 @@ def test(modelin=args.model,outfile=args.out):
 
             Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
 
-            # get eigenvectors of M for each view
+            # get eigenvectors of M
             u,d,v = torch.svd(Matrix)
 
             #solve N=1

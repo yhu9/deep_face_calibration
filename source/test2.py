@@ -14,7 +14,7 @@ import util
 ####################################################
 
 parser = argparse.ArgumentParser(description="training arguments")
-parser.add_argument("--model", default="model/model_ximgnoisy.pt")
+parser.add_argument("--model", default="")
 parser.add_argument("--out",default="results/exp.mat")
 args = parser.parse_args()
 
@@ -23,7 +23,7 @@ args = parser.parse_args()
 def test(modelin=args.model,outfile=args.out):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = PointNet(k=1+199, feature_transform=False)
+    model = CalibrationNet2()
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
     model.cuda()
@@ -90,7 +90,7 @@ def test(modelin=args.model,outfile=args.out):
 
             Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
 
-            # get eigenvectors of M for each view
+            # get eigenvectors of M
             u,d,v = torch.svd(Matrix)
 
             #solve N=1

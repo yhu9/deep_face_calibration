@@ -165,7 +165,7 @@ class PointNet(nn.Module):
         self.fc1 = nn.Linear(1024, 512)
         self.fc2 = nn.Linear(512, 256)
         self.fc3 = nn.Linear(256, k)
-        self.dropout = nn.Dropout(p=0.1)
+        self.dropout = nn.Dropout(p=0.3)
         self.bn1 = nn.BatchNorm1d(512)
         self.bn2 = nn.BatchNorm1d(256)
         self.relu = nn.ReLU()
@@ -180,6 +180,15 @@ class PointNet(nn.Module):
 
         #return F.log_softmax(x, dim=1), trans, trans_feat
         return x, trans, trans_feat
+
+    def forward2(self,x):
+        x,trans,trans_feat = self.feat(x)
+
+        x = F.relu(self.bn1(self.fc1(x)))
+        x = F.relu(self.bn2(self.dropout(self.fc2(x))))
+        x = x.mean(0).unsqueeze(0)
+
+        return x, trans,trans_feat
 
 # Recurrent neural network (many-to-one)
 class RNN(nn.Module):
@@ -199,30 +208,63 @@ class RNN(nn.Module):
         out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
 
         # Decode the hidden state of the last time step
-        out = self.fc(out[:, -1, :])
+        # out = self.fc(out[:, -1, :])
+
+        # Take average of all hidden states across the sequence
+        out = self.fc(out.mean(1))
+
         return out
 
 class CalibrationNet(nn.Module):
 
-    def __init__(self,d=68*2,batch_size=16):
+    def __init__(self):
         super(CalibrationNet,self).__init__()
 
-        n_layers = 1;
-        input_dim = 136
-        hidden_dim = 512
-        self.lstm = nn.LSTM(input_dim,hidden_dim,n_layers)
+        input_size=136
+        hidden_size=512
+        num_layers=2
 
-        self.fc1 = nn.Linear(512, 256)
-        self.fc2 = nn.Linear(256, 200)
+        # point net for feature extraction on each view
+        self.pointnet = PointNet(k=256, feature_transform=True)
+
+        # lstm for sequence processing
+        self.rnn = RNN(input_size=256, hidden_size=256, num_layers=2, num_classes=200)
+
+    def forward(self,x):
+        x,_,transfeat  = self.pointnet(x)
+        feattransform_loss = feature_transform_regularizer(transfeat) * 0.001
+        x = x.unsqueeze(0)
+
+        out = self.rnn(x)
+        return out,feattransform_loss
+
+class CalibrationNet2(nn.Module):
+
+    def __init__(self):
+        super(CalibrationNet2,self).__init__()
+
+        input_size=136
+        hidden_size=512
+        num_layers=2
+
+        # point net for feature extraction on each view
+        self.pointnet = PointNet(k=512, feature_transform=True)
+
+        # get final output using pointnet as encoder
+        self.fc1 = nn.Linear(512,256)
+        self.fc2 = nn.Linear(256,200)
+
         self.relu = nn.ReLU()
 
     def forward(self,x):
-        out,state = self.lstm(x)
-        out = out[-1]
+        x,_,transfeat  = self.pointnet(x)
+        feattransform_loss = feature_transform_regularizer(transfeat) * 0.001
+        x = x.mean(0).unsqueeze(0)
 
-        out = self.relu(self.fc1(out))
+        out = self.relu(self.fc1(x))
         out = self.fc2(out)
-        return out
+
+        return out,feattransform_loss
 
 def feature_transform_regularizer(trans):
     d = trans.size()[1]

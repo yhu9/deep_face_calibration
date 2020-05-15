@@ -6,9 +6,7 @@ import torch
 import torch.optim
 
 from logger import Logger
-from model import PointNet
-from model import RNN
-from model import feature_transform_regularizer
+from model import CalibrationNet2
 import dataloader
 import util
 
@@ -29,7 +27,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
         logger = Logger(logname)
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = PointNet(k=1+199,feature_transform=True)
+    model = CalibrationNet2()
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
     model.cuda()
@@ -41,7 +39,6 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
     mu_lm = torch.from_numpy(data.mu_lm).float().cuda()
     lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float().cuda()
     #exp_eigenvec = torch.from_numpy(data.exp_eigenvec).float()
-
     M = data.M
 
     # main training loop
@@ -62,11 +59,12 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             x_img_one = torch.cat([x_img,one],dim=1)
 
             # run the model
-            out, trans, transfeat = model(x_img_one)
-            feattransform_loss = feature_transform_regularizer(transfeat)*0.001
+            batch_out,feat_loss = model(x_img_one)
+            out = batch_out.squeeze()
 
-            betas = out[:,:199].mean(0)
-            f = torch.relu(out[:,199]).mean(0)
+            # evaluate the extrinsics
+            betas = out[:199]
+            f = torch.relu(out[199])
             K = torch.zeros((3,3)).float().cuda()
             K[0,0] = f;
             K[1,1] = f;
@@ -95,9 +93,6 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
 
             # get eigenvectors of M
             u,d,v_double = torch.svd(Matrix.double())
-            degeneracy = d < 1
-            degeneracy = degeneracy.float()
-            ratio = torch.mean(degeneracy.sum(1))
             v = v_double.float()
 
             #solve N=1
@@ -107,6 +102,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
             reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
+            '''
             # solve N=2
             # get distance contraints
             d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
@@ -122,6 +118,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             mask = reproj_error2_n1 < reproj_error2_n2
             reproj_error = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask])).mean()
             reconstruction_error = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask])).mean()
+            '''
 
             # beta error
             beta_error = torch.mean(torch.abs(betas - beta_gt))
@@ -131,21 +128,19 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
 
             # weight update
             #loss = f_error + reconstruction_error
-            #loss = f_error*0.01 + reconstruction_error*0.01 + beta_error
-            # loss = f_error*0.01 + beta_error + reconstruction_error*0.01
-            loss = f_error*0.01 + beta_error + reproj_error+ reconstruction_error*0.01
+            loss = f_error*0.1  + beta_error + feat_loss.mean() + reproj_error3_n1.mean()*0.01
+            #loss = f_error*0.01 + beta_error + reconstruction_error*0.01
             loss.backward()
             optimizer.step()
 
             #LOG THE SUMMARIES
             if log:
-                logger.scalar_summary({'degeneracy': ratio.item()})
-                logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item()})
+                logger.scalar_summary({'rec_error': reproj_error3_n1.mean().item(), 'f_error': f_error.item(),'rep_error': reproj_error2_n1.mean().item()})
+                #logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item()})
                 logger.incStep()
 
-            #print(f"epoch/batch {epoch}/{i}  |   Loss: {loss:.4f} | reproj: {reproj_error:.4f} ")
-            #print(f"epoch/batch {epoch}/{i}  |   Loss: {loss:.4f} | reproj: {reproj_error:.4f} ")
-            print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | rec: {reconstruction_error.item():.4f}  | rep: {reproj_error.item():.4f} | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}   | beta_error: {beta_error.item():.4f}")
+            print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | beta_error: {beta_error.item():.4f} | rec: {reproj_error3_n1.mean().item():.4f}  | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}")
+            #print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | rec: {reconstruction_error.item():.4f}  | rep: {reproj_error.item():.4f} | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}   | beta_error: {beta_error.item():.4f}")
         print("saving!")
         torch.save(model.state_dict(), modelout)
 
