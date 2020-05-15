@@ -41,6 +41,40 @@ class Data():
         print(f"BATCH SIZE: {self.batchsize}")
         print()
 
+class TestLoader(Dataset):
+
+    def __init__(self,f):
+        root_dir = os.path.join("/home/huynshen/data/synthetic_3dface",f"sequencef{f:04d}")
+        self.root_dir = root_dir
+        self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
+        self.files.sort()
+
+    def __len__(self):
+
+        return len(self.files)
+
+    def __getitem__(self,idx):
+        fname = self.files[idx]
+        data = scipy.io.loadmat(fname)
+
+        tmp = data['sequence'][0,0]
+        x_w = tmp['x_w']
+        x_img = tmp['x_img']
+        x_img_gt = tmp['x_img_true']
+        x_cam = tmp['x_cam']
+        R = tmp['R']
+        T = tmp['T']
+        f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
+
+        sample = {}
+        sample['x_w_gt'] = torch.from_numpy(x_w).float()
+        sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
+        sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
+        sample['x_img_gt'] = torch.from_numpy(x_img_gt).float().permute(0,2,1)
+        sample['f_gt'] = torch.Tensor(f).float()
+
+        return sample
+
 class SyntheticLoader(Dataset):
 
     def __init__(self):
@@ -71,6 +105,8 @@ class SyntheticLoader(Dataset):
         self.N = 68
 
         # extra boundaries on camera coordinates
+        self.w = 640
+        self.h = 480
         self.minx = -160; self.maxx = 160;
         self.miny = -120; self.maxy = 120;
         self.minz = 800; self.maxz = 1500;
@@ -79,7 +115,7 @@ class SyntheticLoader(Dataset):
         self.xstd = 1; self.ystd = 1;
 
     def __len__(self):
-        return 100
+        return 10000
 
     def __getitem__(self,idx):
 
@@ -94,11 +130,12 @@ class SyntheticLoader(Dataset):
         T = np.zeros((M,3));
 
         # define intrinsics
-        f = random.random() * 2000;
+        f = 300 + random.random() * 2500;
         K = np.array([[f,0,320],[ 0,f,240], [0,0,1]])
 
         # create random 3dmm shape
-        alphas = np.diag(np.random.randn(199))
+        alpha = np.random.randn(199)
+        alphas = np.diag(alpha)
         s = np.sum(np.matmul(self.lm_eigenvec,alphas),1)
         s = s.reshape(68,3)
         lm = self.mu_lm + s
@@ -111,13 +148,25 @@ class SyntheticLoader(Dataset):
         exp = e
 
         # get initial and final rotation
-        q_init = self.generateRandomRotation()
-        q_final = self.generateRandomRotation()
-        t_init = self.generateRandomTranslation()
-        t_final = self.generateRandomTranslation()
+        while True:
+            q_init = self.generateRandomRotation()
+            q_final = self.generateRandomRotation()
+            t_init = self.generateRandomTranslation()
+            t_final = self.generateRandomTranslation()
+            if np.dot(q_init,q_final) < 0:
+                q_final = q_final * -1
 
-        if np.dot(q_init,q_final) < 0:
-            q_final = q_final * -1
+            ximg_init = self.project2d(q_init,t_init,K,x_w)
+            ximg_final = self.project2d(q_final,t_final,K,x_w)
+            if np.any(np.amin(ximg_init,axis=0) < 0): continue
+            if np.any(np.amin(ximg_final,axis=0) < 0): continue
+            init = np.amax(ximg_init,axis=0)
+            final = np.amax(ximg_final,axis=0)
+            if init[0] > 640: continue
+            if final[0] > 640: continue
+            if init[1] > 480: continue
+            if final[1] > 480: continue
+            break
 
         quaternion = np.stack((np.linspace(q_init[0],q_final[0],M),
                 np.linspace(q_init[1],q_final[1],M),
@@ -164,15 +213,16 @@ class SyntheticLoader(Dataset):
 
         # create dictionary for results
         sample = {}
+        sample['beta_gt'] = torch.from_numpy(alpha).float()
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
         sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
         sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
         sample['x_img_gt'] = torch.from_numpy(x_img_true).float().permute(0,2,1)
         sample['f_gt'] = torch.Tensor([f]).float()
-        sample['K_gt'] = torch.from_numpy(K).float()
-        sample['R_gt'] = torch.from_numpy(R).float()
-        sample['Q_gt'] = torch.from_numpy(Q).float()
-        sample['T_gt'] = torch.from_numpy(T).float()
+        #sample['K_gt'] = torch.from_numpy(K).float()
+        #sample['R_gt'] = torch.from_numpy(R).float()
+        #sample['Q_gt'] = torch.from_numpy(Q).float()
+        #sample['T_gt'] = torch.from_numpy(T).float()
         return sample
 
     def generateRandomRotation(self):
@@ -199,6 +249,21 @@ class SyntheticLoader(Dataset):
         xyz[2] = xyz[2] * (self.maxz - self.minz) + self.minz
 
         return xyz
+
+    def project2d(self,q,t,K,pw):
+
+        q = q/np.linalg.norm(q)
+        rx = np.arctan2(2*(q[0]*q[1] + q[2]*q[3]),1-2*(q[1]**2+q[2]**2));
+        ry = np.arcsin(2*(q[0]*q[2] - q[3]*q[1]));
+        rz = np.arctan2(2*(q[0]*q[3] + q[1]*q[2]),1-2*(q[2]**2+q[3]**2));
+        r = Rotation.from_euler('zyx', [rz,ry,rx], degrees=False).as_matrix()
+        xc = np.matmul(r,pw.T) + np.expand_dims(t,1);
+
+        proj = np.matmul(K,xc)
+        proj = proj / proj[2,:]
+        ximg = proj.T
+
+        return ximg
 
 # LOADER FOR BIWI KINECT DATASET ONLY
 class Face3DMM():
@@ -268,6 +333,19 @@ class ToTensor(object):
 # UNIT TESTING
 if __name__ == '__main__':
 
+    loader = SyntheticLoader()
+
+    sample = loader[1]
+    print("sample made")
+    print(sample.keys())
+
+    quit()
+    loader = TestLoader(1000)
+    sample = loader[1]
+    print("sample made")
+    print(sample.keys())
+
+    quit()
     # test training loader
     loader = SyntheticLoader()
 

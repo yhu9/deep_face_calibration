@@ -15,6 +15,7 @@ class Logger(object):
     def __init__(self, log_dir):
         """Create a summary writer logging to log_dir."""
         log_dir = os.path.join('log',log_dir)
+        self.step = 0
         for i in range(5):
             final = log_dir + str(i)
             if not os.path.exists(final):
@@ -25,14 +26,18 @@ class Logger(object):
         print('all sessions full. please delete one of the logs')
         quit()
 
-    def scalar_summary(self, data, step):
+    def incStep(self):
+        self.step += 1
+        return self.step
+
+    def scalar_summary(self, data):
         """Log a scalar variable."""
 
         for tag, value in data.items():
             summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
-            self.writer.add_summary(summary, step)
+            self.writer.add_summary(summary, self.step)
 
-    def image_summary(self, tag, images, step):
+    def image_summary(self, tag, images):
         """Log a list of images."""
 
         img_summaries = []
@@ -53,9 +58,9 @@ class Logger(object):
 
         # Create and write Summary
         summary = tf.Summary(value=img_summaries)
-        self.writer.add_summary(summary, step)
+        self.writer.add_summary(summary, self.step)
 
-    def histo_summary(self, tag, values, step, bins=1000):
+    def histo_summary(self, tag, values, bins=1000):
         """Log a histogram of the tensor of values."""
 
         # Create a histogram using numpy
@@ -80,7 +85,7 @@ class Logger(object):
 
         # Create and write Summary
         summary = tf.Summary(value=[tf.Summary.Value(tag=tag, histo=hist)])
-        self.writer.add_summary(summary, step)
+        self.writer.add_summary(summary, self.step)
         self.writer.flush()
 
 
