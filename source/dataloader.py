@@ -44,7 +44,7 @@ class Data():
 class TestLoader(Dataset):
 
     def __init__(self,f):
-        root_dir = os.path.join("/home/huynshen/data/synthetic_3dface",f"sequencef{f:04d}")
+        root_dir = os.path.join("../data/synthetic_3dface",f"sequencef{f:04d}")
         self.root_dir = root_dir
         self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
         self.files.sort()
@@ -80,7 +80,7 @@ class SyntheticLoader(Dataset):
     def __init__(self):
 
         #self.transform = transforms.Compose([ToTensor()])
-        root_dir = "/home/huynshen/data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+        root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
 
         # load shape data
         shape_data = scipy.io.loadmat(root_dir)
