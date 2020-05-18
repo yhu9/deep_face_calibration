@@ -59,7 +59,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             x_img_one = torch.cat([x_img,one],dim=1)
 
             # run the model
-            batch_out,feat_loss = model(x_img_one)
+            batch_out,meanfeat_loss, feat_loss = model(x_img_one)
             out = batch_out.squeeze()
 
             # evaluate the extrinsics
@@ -100,9 +100,8 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
             Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
             reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
-            reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
+            reproj_error3_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
-            '''
             # solve N=2
             # get distance contraints
             d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
@@ -112,34 +111,33 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
             Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
             reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
-            reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
+            reproj_error3_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn2,Tn2)
 
             # objective
             mask = reproj_error2_n1 < reproj_error2_n2
             reproj_error = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask])).mean()
             reconstruction_error = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask])).mean()
-            '''
 
             # beta error
             beta_error = torch.mean(torch.abs(betas - beta_gt))
 
             # focal length error
-            f_error = torch.abs(f_gt - f)
+            f_error = torch.abs(f_gt - f) / f_gt
 
             # weight update
             #loss = f_error + reconstruction_error
-            loss = f_error*0.1  + beta_error + feat_loss.mean() + reproj_error3_n1.mean()*0.01
-            #loss = f_error*0.01 + beta_error + reconstruction_error*0.01
+            #loss = f_error*0.1  + beta_error + reproj_error3_n1.mean()*0.1
+            loss = f_error + reconstruction_error + meanfeat_loss
             loss.backward()
             optimizer.step()
 
             #LOG THE SUMMARIES
             if log:
-                logger.scalar_summary({'rec_error': reproj_error3_n1.mean().item(), 'f_error': f_error.item(),'rep_error': reproj_error2_n1.mean().item()})
+                logger.scalar_summary({'rec_error': reproj_error3_n1.mean().item(), 'f_error': f_error.item(),'rep_error': reproj_error2_n1.mean().item(), 'meanfeat_loss': meanfeat_loss.item()})
                 #logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item()})
                 logger.incStep()
 
-            print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | beta_error: {beta_error.item():.4f} | rec: {reproj_error3_n1.mean().item():.4f}  | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}")
+            print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | beta_error: {beta_error.item():.4f} | rec: {reproj_error3_n1.mean().item():.4f}  | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}  | meanfeat: {meanfeat_loss.item():.4f}")
             #print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | rec: {reconstruction_error.item():.4f}  | rep: {reproj_error.item():.4f} | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}   | beta_error: {beta_error.item():.4f}")
         print("saving!")
         torch.save(model.state_dict(), modelout)

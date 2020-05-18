@@ -259,12 +259,13 @@ class CalibrationNet2(nn.Module):
     def forward(self,x):
         x,_,transfeat  = self.pointnet(x)
         feattransform_loss = feature_transform_regularizer(transfeat) * 0.001
-        x = x.mean(0).unsqueeze(0)
+        meanfeat = x.mean(0).unsqueeze(0)
+        meanfeat_loss = torch.mean(torch.abs(x-meanfeat))
 
-        out = self.relu(self.fc1(x))
+        out = self.relu(self.fc1(meanfeat))
         out = self.fc2(out)
 
-        return out,feattransform_loss
+        return out, meanfeat_loss, feattransform_loss
 
 def feature_transform_regularizer(trans):
     d = trans.size()[1]

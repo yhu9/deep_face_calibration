@@ -16,14 +16,15 @@ import util
 parser = argparse.ArgumentParser(description="training arguments")
 parser.add_argument("--model", default="model/model_ximgnoisy.pt")
 parser.add_argument("--out",default="results/exp.mat")
+parser.add_argument("--feature_transform",type=bool, default=False)
 args = parser.parse_args()
 
 ####################################################
 
-def test(modelin=args.model,outfile=args.out):
+def test(modelin=args.model,outfile=args.out,feature_transform=args.feature_transform):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = PointNet(k=1+199, feature_transform=False)
+    model = PointNet(k=1+199, feature_transform=feature_transform)
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
     model.cuda()

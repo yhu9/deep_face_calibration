@@ -78,7 +78,8 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             alpha_matrix = torch.diag(betas)
             shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
             s = shape_cov.sum(1).view(68,3)
-            shape = (mu_lm + s)
+            #shape = (mu_lm + s)
+            shape = mu_lm
 
             # run epnp algorithm
             # get control points
@@ -105,7 +106,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
             Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
             reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
-            reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
+            reproj_error3_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
             # solve N=2
             # get distance contraints
@@ -116,7 +117,7 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
             Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
             reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
-            reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
+            reproj_error3_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn2,Tn2)
 
             # objective
             mask = reproj_error2_n1 < reproj_error2_n2
@@ -127,13 +128,15 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
             beta_error = torch.mean(torch.abs(betas - beta_gt))
 
             # focal length error
-            f_error = torch.abs(f_gt - f)
+            f_error = torch.abs(f_gt - f) / f_gt
 
             # weight update
             #loss = f_error + reconstruction_error
             #loss = f_error*0.01 + reconstruction_error*0.01 + beta_error
             # loss = f_error*0.01 + beta_error + reconstruction_error*0.01
-            loss = f_error*0.01 + beta_error + reproj_error+ reconstruction_error*0.01
+            # loss = f_error*0.01 + beta_error + reproj_error+ reconstruction_error*0.01
+            # loss = f_error + reconstruction_error + feattransform_loss
+            loss = f_error*0.5 + reconstruction_error
             loss.backward()
             optimizer.step()
 
