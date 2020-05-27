@@ -8,19 +8,19 @@ import numpy as np
 
 from logger import Logger
 from model import PointNet
-from model import CalibrationNet2
 import dataloader
 import util
 
 ####################################################
 
 parser = argparse.ArgumentParser(description="training arguments")
-parser.add_argument("--model", default="")
+parser.add_argument("--model", default="model/model_ximgnoisy.pt")
 parser.add_argument("--out",default="results/exp.mat")
 parser.add_argument("--feat_trans", default=False, action='store_true')
 args = parser.parse_args()
 
 ####################################################
+
 def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
@@ -51,10 +51,9 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
         x_img_one = torch.cat([x_img,one],dim=1)
 
         # run the model
-        batch_out, meanfeat_loss, transfeat = model(x_img_one)
-        out = batch_out.squeeze()
-        alphas = out[:199]
-        f = torch.relu(out[199])
+        out, trans, transfeat = model(x_img_one)
+        alphas = out[:,:199].mean(0)
+        f = torch.relu(out[:,199]).mean()
         K = torch.zeros((3,3)).float().cuda()
         K[0,0] = f;
         K[1,1] = f;
@@ -66,8 +65,8 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
         alpha_matrix = torch.diag(alphas)
         shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
         s = shape_cov.sum(1).view(68,3)
-        #shape = (mu_lm + s)
-        shape = mu_lm
+        shape = (mu_lm + s)
+        shae[:,2] = shape[:,2]*-1
 
         # run epnp algorithm
         # get control points
@@ -105,8 +104,8 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
         reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
         rel_error_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
-        # criteria to determine the best solution during testing
         mask = reproj_error2_n1 < reproj_error2_n2
+
 
         reproj_errors = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask]))
         rmse_errors = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask]))
@@ -138,7 +137,7 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
 
-def test(model,modelin=args.model,outfile=args.out):
+def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
     if modelin != "":
@@ -152,6 +151,13 @@ def test(model,modelin=args.model,outfile=args.out):
     lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().cuda()
 
     # sample from f testing set
+    allerror_2d = []
+    allerror_3d = []
+    allerror_rel3d = []
+    allerror_relf = []
+    allerror_f = []
+    allerror_d = []
+
     seterror_3d = []
     seterror_rel3d = []
     seterror_relf = []
@@ -173,71 +179,82 @@ def test(model,modelin=args.model,outfile=args.out):
             f_gt = batch['f_gt'].cuda()
             x_img = batch['x_img'].cuda()
             x_img_gt = batch['x_img_gt'].cuda()
+            T_gt = batch['T_gt']
+
+            allerror_d.append(T_gt[:,2])
 
             one  = torch.ones(M,1,68).cuda()
             x_img_one = torch.cat([x_img,one],dim=1)
 
             # run the model
-            batch_out, meanfeat_loss, feat_loss = model(x_img_one)
-            out = batch_out.squeeze()
-            alphas = out[:199]
-            f = torch.relu(out[199])
+            out, trans, transfeat = model(x_img_one)
+            alphas = out[:,:199].mean(0)
+            f = torch.relu(out[:,199]).mean()
             K = torch.zeros((3,3)).float().cuda()
-            K[0,0] = f;
-            K[1,1] = f;
-            K[2,2] = 1;
-            K[0,2] = 320;
-            K[1,2] = 240;
 
-            # apply 3DMM model from predicted parameters
-            alpha_matrix = torch.diag(alphas)
-            shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
-            s = shape_cov.sum(1).view(68,3)
-            shape = mu_lm
+            for f = np.linspace(-200,200,100):
+                K[0,0] = f;
+                K[1,1] = f;
+                K[2,2] = 1;
+                K[0,2] = 320;
+                K[1,2] = 240;
 
-            # run epnp algorithm
-            # get control points
-            c_w = util.getControlPoints(shape)
+                # apply 3DMM model from predicted parameters
+                alpha_matrix = torch.diag(alphas)
+                shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
+                s = shape_cov.sum(1).view(68,3)
+                #shape = (mu_lm + s)
+                shape = mu_lm
+                shape[:,2] = shape[:,2]*-1
 
-            # solve alphas
-            alphas = util.solveAlphas(shape,c_w)
+                # run epnp algorithm
+                # get control points
+                c_w = util.getControlPoints(shape)
 
-            # setup M
-            px = 320;
-            py = 240;
+                # solve alphas
+                alphas = util.solveAlphas(shape,c_w)
 
-            Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
+                # setup M
+                px = 320;
+                py = 240;
+                Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
 
-            # get eigenvectors of M
-            u,d,v = torch.svd(Matrix)
+                # get eigenvectors of M for each view
+                u,d,v = torch.svd(Matrix)
 
-            #solve N=1
-            c_c_n1 = v[:,:,-1].reshape((100,4,3)).permute(0,2,1)
-            _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
-            Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
-            reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
-            reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
-            rel_error_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
+                #solve N=1
+                c_c_n1 = v[:,:,-1].reshape((100,4,3)).permute(0,2,1)
+                _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
+                Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
+                reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
+                reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
+                rel_error_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
-            # solve N=2
-            # get distance contraints
-            d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
-            distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
-            beta_n2 = util.getBetaN2(v[:,:,-2:],distances)
-            c_c_n2 = util.getControlPointsN2(v[:,:,-2:],beta_n2)
-            _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
-            Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
-            reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
-            reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
-            rel_error_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
+                # solve N=2
+                # get distance contraints
+                d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
+                distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
+                beta_n2 = util.getBetaN2(v[:,:,-2:],distances)
+                c_c_n2 = util.getControlPointsN2(v[:,:,-2:],beta_n2)
+                _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
+                Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
+                reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
+                reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
+                rel_error_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
 
-            mask = reproj_error2_n1 < reproj_error2_n2
+                mask = reproj_error2_n1 < reproj_error2_n2
+                reproj_errors = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask]))
+                rmse_errors = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask]))
+                rel_errors = torch.cat((rel_error_n2[~mask],rel_error_n1[mask]))
 
-            reproj_errors = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask]))
-            rmse_errors = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask]))
-            rel_errors = torch.cat((rel_error_n2[~mask],rel_error_n1[mask]))
+                print(rel_errors.mean())
+                quit()
 
             # errors
+            allerror_3d.append(reproj_errors.cpu().data.numpy())
+            allerror_2d.append(rmse_errors.cpu().data.numpy())
+            allerror_rel3d.append(rel_errors.cpu().data.numpy())
+
             reproj_error = torch.mean(reproj_errors)
             reconstruction_error = torch.mean(rmse_errors)
             rel_error = torch.mean(rel_errors)
@@ -263,7 +280,16 @@ def test(model,modelin=args.model,outfile=args.out):
         seterror_relf.append(avg_relf)
         #end for
 
+    allerror_d = np.stack(allerror_d).flatten()
+    allerror_2d = np.stack(allerror_2d).flatten()
+    allerror_3d = np.stack(allerror_3d).flatten()
+    allerror_rel3d = np.stack(allerror_rel3d).flatten()
+
     matdata = {}
+    matdata['error_d'] = allerror_d
+    matdata['error_2d'] = allerror_2d
+    matdata['error_3d'] = allerror_3d
+    matdata['error_rel3d'] = allerror_rel3d
     matdata['fvals'] = np.array(f_vals)
     matdata['seterror_2d'] = np.array(seterror_2d)
     matdata['seterror_3d'] = np.array(seterror_3d)
@@ -276,13 +302,15 @@ def test(model,modelin=args.model,outfile=args.out):
     print(f"MEAN seterror_3d: {np.mean(seterror_3d)}")
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
-
     #end function
 
 ####################################################################################3
 if __name__ == '__main__':
-    model = CalibrationNet2()
-    #test(model)
 
+    model = PointNet(k=1+199, feature_transform=args.feat_trans)
+
+    test(model)
+    quit()
     testBIWI(model)
+
 

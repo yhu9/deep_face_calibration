@@ -193,6 +193,9 @@ def scaleControlPoints(c_c,c_w,alphas,x_w):
     centered_xc = x_c - torch.mean(x_c,dim=2).unsqueeze(2)
     d_c = torch.norm(centered_xc,p=2,dim=1)
 
+    #s = print(d_w.shape)
+    #s = torch.mean(d_c / d_w.unsqueeze(0),axis=1)
+
     # least square solution to scale
     s = 1.0 /((1.0/(torch.sum(d_c*d_c,dim=1)) * torch.sum(d_c*d_w.unsqueeze(0),dim=1)))
 
@@ -319,6 +322,22 @@ def getRelReprojError3(xcam,pw,R,T):
     pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
     pct = pc + T.unsqueeze(2)
 
+    '''
+    import pptk
+    x1 = xcam[1].T
+    x2 = pct[1].T
+    x1 = x1.cpu().data.numpy()
+    x2 = x2.cpu().data.numpy()
+    print(pct[1])
+    print(xcam[1])
+    print(T[1])
+    quit()
+    pts = np.concatenate((x1,x2),axis=0)
+    pptk.viewer(pts)
+    quit()
+    '''
+
+
     diff = pct - xcam
     d = torch.norm(xcam,p=2,dim=1)
     error = torch.norm(diff,p=2,dim=1)
@@ -381,6 +400,10 @@ def getBetaN2(v,d):
     M[:,5,1] = M51
     M[:,5,2] = M52
 
+    mtm_inv_mt = torch.bmm(torch.inverse(torch.bmm(M.permute(0,2,1),M)),M.permute(0,2,1))
+    betas = torch.bmm(mtm_inv_mt,torch.stack(views*[d]).unsqueeze(-1))
+    #mtb[0]
+
     # not sure which would be more stable solution
     # solve for betas using inverse of MtM
     #MtM = torch.bmm(M.permute(0,2,1),M)
@@ -392,6 +415,7 @@ def getBetaN2(v,d):
 
     # solve lstsq using svd on batch
     # https://gist.github.com/gngdb/611d8f180ef0f0baddaa539e29a4200e
+    '''
     U_double,D_double,V_double = torch.svd(M.double())
     U = U_double.float()
     D = D_double.float()
@@ -401,6 +425,7 @@ def getBetaN2(v,d):
     D_inv = torch.diag_embed(1.0/D)
     VS = torch.bmm(V,D_inv)
     betas = torch.bmm(VS, Utb)
+    '''
 
     return betas
 
@@ -408,18 +433,322 @@ def getBetaN2(v,d):
 #
 #INPUT:
 #   v               (Mx12x2)
-#   beta            (Mx3x1)
+#   beta            (Mx4)
 #OUTPUT:
 #   c_c             (Mx3x4)
 def getControlPointsN2(v,beta):
     M = v.shape[0]
-    b1 = torch.sqrt(torch.abs(beta[:,0]))
-    b2 = torch.sqrt(torch.abs(beta[:,2])) * torch.sign(beta[:,1]) * torch.sign(beta[:,0])
-
-    p = v[:,:,0]*b1 + v[:,:,1]*b2
+    b1 = beta[:,2]
+    b2 = beta[:,3]
+    #b1 = torch.sqrt(torch.abs(beta[:,0]))
+    #b2 = torch.sqrt(torch.abs(beta[:,2])) * torch.sign(beta[:,1]) * torch.sign(beta[:,0])
+    p = v[:,:,0]*b1.unsqueeze(1) + v[:,:,1]*b2.unsqueeze(1)
 
     c_c = p.reshape((M,4,3)).permute(0,2,1)
     return c_c
+
+# optimize via gauss newton the betas
+# get the optimzed rotation, translation, and camera coord
+def optimize_betas_gauss_newton(km, cw, betas, alphas, x_w, x_img, A):
+
+    M = km.shape[0]
+    beta_opt, err, iter = gauss_newton(km,cw,betas)
+
+    # compute control points using optimized betas
+    kmsum = beta_opt[:,0].unsqueeze(1)*km[:,:,0] + beta_opt[:,1].unsqueeze(1)*km[:,:,1] + beta_opt[:,2].unsqueeze(1)*km[:,:,2] + beta_opt[:,3].unsqueeze(1)*km[:,:,3]
+    c_c = kmsum.reshape((M,4,3)).permute(0,2,1)
+
+    # check sign of the determinent to keep orientation
+    sign1 = torch.sign(torch.det(cw[:3,:3]))
+    sign2 = sign_determinant(c_c)
+
+    # get extrinsics
+    cc = c_c * (sign1*sign2).unsqueeze(1).unsqueeze(1)
+    rep_alpha = torch.stack(M*[alphas])
+    Xc_opt = torch.bmm(cc,rep_alpha)
+
+    return Xc_opt, iter
+
+def gauss_newton(km,cw,betas):
+
+    L = compute_L6_10(km)
+    rho = compute_rho(cw)
+
+    n_iterations = 10
+    current_betas = betas
+
+    # repeat below code for more iterations of gauss newton, but 4-5 should be enough
+    betas1, _ = gauss_newton_step(betas,rho,L)
+    betas2, _ = gauss_newton_step(betas1,rho,L)
+    betas3, _ = gauss_newton_step(betas2,rho,L)
+    betas4, _ = gauss_newton_step(betas3,rho,L)
+    betas5, err = gauss_newton_step(betas4,rho,L)
+
+    iter = torch.stack((betas1,betas2,betas3,betas4,betas5))
+
+    return betas5, err, iter
+
+def gauss_newton_step(betas,rho,L):
+    M = betas.shape[0]
+    A,b = computeJacobian(betas,rho,L)
+    ata = torch.bmm(A.permute(0,2,1),A)
+    ata_inv_at = torch.bmm(torch.inverse(ata),A.permute(0,2,1))
+    dbeta = torch.bmm(ata_inv_at,b.unsqueeze(-1))
+    next_betas = betas.unsqueeze(-1) + dbeta
+
+    error = torch.bmm(b.view((M,1,6)),b.view((M,6,1)))
+    return next_betas.squeeze(), error
+
+# compute the derivatives of the eigenvector summation for gauss newton
+#
+#INPUT:
+# km            (M,12,4)
+#OUTPUT:
+# L             (M,6,10)
+def compute_L6_10(km):
+
+    M = km.shape[0]
+    L = torch.zeros((M,6,10))
+    v1 = km[:,:,0]
+    v2 = km[:,:,1]
+    v3 = km[:,:,2]
+    v4 = km[:,:,3]
+
+    # compute differenes
+    dx112 = v1[:,0] - v1[:,3];
+    dx113 = v1[:,0] - v1[:,6];
+    dx114 = v1[:,0] - v1[:,9];
+    dx123 = v1[:,3] - v1[:,6];
+    dx124 = v1[:,3] - v1[:,9];
+    dx134 = v1[:,6] - v1[:,9];
+    dy112 = v1[:,1] - v1[:,4];
+    dy113 = v1[:,1] - v1[:,7];
+    dy114 = v1[:,1] - v1[:,10];
+    dy123 = v1[:,4] - v1[:,7];
+    dy124 = v1[:,4] - v1[:,10];
+    dy134 = v1[:,7] - v1[:,10];
+    dz112 = v1[:,2] - v1[:,5];
+    dz113 = v1[:,2] - v1[:,8];
+    dz114 = v1[:,2] - v1[:,11];
+    dz123 = v1[:,5] - v1[:,8];
+    dz124 = v1[:,5] - v1[:,11];
+    dz134 = v1[:,8] - v1[:,11];
+
+    dx212 = v2[:,0] - v2[:,3];
+    dx213 = v2[:,0] - v2[:,6];
+    dx214 = v2[:,0] - v2[:,9];
+    dx223 = v2[:,3] - v2[:,6];
+    dx224 = v2[:,3] - v2[:,9];
+    dx234 = v2[:,6] - v2[:,9];
+    dy212 = v2[:,1] - v2[:,4];
+    dy213 = v2[:,1] - v2[:,7];
+    dy214 = v2[:,1] - v2[:,10];
+    dy223 = v2[:,4] - v2[:,7];
+    dy224 = v2[:,4] - v2[:,10];
+    dy234 = v2[:,7] - v2[:,10];
+    dz212 = v2[:,2] - v2[:,5];
+    dz213 = v2[:,2] - v2[:,8];
+    dz214 = v2[:,2] - v2[:,11];
+    dz223 = v2[:,5] - v2[:,8];
+    dz224 = v2[:,5] - v2[:,11];
+    dz234 = v2[:,8] - v2[:,11];
+
+    dx312 = v3[:,0] - v3[:,3];
+    dx313 = v3[:,0] - v3[:,6];
+    dx314 = v3[:,0] - v3[:,9];
+    dx323 = v3[:,3] - v3[:,6];
+    dx324 = v3[:,3] - v3[:,9];
+    dx334 = v3[:,6] - v3[:,9];
+    dy312 = v3[:,1] - v3[:,4];
+    dy313 = v3[:,1] - v3[:,7];
+    dy314 = v3[:,1] - v3[:,10];
+    dy323 = v3[:,4] - v3[:,7];
+    dy324 = v3[:,4] - v3[:,10];
+    dy334 = v3[:,7] - v3[:,10];
+    dz312 = v3[:,2] - v3[:,5];
+    dz313 = v3[:,2] - v3[:,8];
+    dz314 = v3[:,2] - v3[:,11];
+    dz323 = v3[:,5] - v3[:,8];
+    dz324 = v3[:,5] - v3[:,11];
+    dz334 = v3[:,8] - v3[:,11];
+
+    dx412 = v4[:,0] - v4[:,3];
+    dx413 = v4[:,0] - v4[:,6];
+    dx414 = v4[:,0] - v4[:,9];
+    dx423 = v4[:,3] - v4[:,6];
+    dx424 = v4[:,3] - v4[:,9];
+    dx434 = v4[:,6] - v4[:,9];
+    dy412 = v4[:,1] - v4[:,4];
+    dy413 = v4[:,1] - v4[:,7];
+    dy414 = v4[:,1] - v4[:,10];
+    dy423 = v4[:,4] - v4[:,7];
+    dy424 = v4[:,4] - v4[:,10];
+    dy434 = v4[:,7] - v4[:,10];
+    dz412 = v4[:,2] - v4[:,5];
+    dz413 = v4[:,2] - v4[:,8];
+    dz414 = v4[:,2] - v4[:,11];
+    dz423 = v4[:,5] - v4[:,8];
+    dz424 = v4[:,5] - v4[:,11];
+    dz434 = v4[:,8] - v4[:,11];
+
+    L[:,0,0] =        dx112 * dx112 + dy112 * dy112 + dz112 * dz112;      #b1*b1
+    L[:,0,1] = 2.0 *  (dx112 * dx212 + dy112 * dy212 + dz112 * dz212);    #b1*b2
+    L[:,0,2] =        dx212 * dx212 + dy212 * dy212 + dz212 * dz212;      #b2*b2
+    L[:,0,3] = 2.0 *  (dx112 * dx312 + dy112 * dy312 + dz112 * dz312);    #b1*b3
+    L[:,0,4] = 2.0 *  (dx212 * dx312 + dy212 * dy312 + dz212 * dz312);    #b2*b3
+    L[:,0,5] =        dx312 * dx312 + dy312 * dy312 + dz312 * dz312;      #b3*b3
+    L[:,0,6] = 2.0 *  (dx112 * dx412 + dy112 * dy412 + dz112 * dz412);    #b1*b4
+    L[:,0,7] = 2.0 *  (dx212 * dx412 + dy212 * dy412 + dz212 * dz412);    #b2*b4
+    L[:,0,8] = 2.0 *  (dx312 * dx412 + dy312 * dy412 + dz312 * dz412);    #b3*b4
+    L[:,0,9] =       dx412 * dx412 + dy412 * dy412 + dz412 * dz412;      #b4*b4
+
+    L[:,1,0] =        dx113 * dx113 + dy113 * dy113 + dz113 * dz113;
+    L[:,1,1] = 2.0 *  (dx113 * dx213 + dy113 * dy213 + dz113 * dz213);
+    L[:,1,2] =        dx213 * dx213 + dy213 * dy213 + dz213 * dz213;
+    L[:,1,3] = 2.0 *  (dx113 * dx313 + dy113 * dy313 + dz113 * dz313);
+    L[:,1,4] = 2.0 *  (dx213 * dx313 + dy213 * dy313 + dz213 * dz313);
+    L[:,1,5] =        dx313 * dx313 + dy313 * dy313 + dz313 * dz313;
+    L[:,1,6] = 2.0 *  (dx113 * dx413 + dy113 * dy413 + dz113 * dz413);
+    L[:,1,7] = 2.0 *  (dx213 * dx413 + dy213 * dy413 + dz213 * dz413);
+    L[:,1,8] = 2.0 *  (dx313 * dx413 + dy313 * dy413 + dz313 * dz413);
+    L[:,1,9] =       dx413 * dx413 + dy413 * dy413 + dz413 * dz413;
+
+    L[:,2,0] =        dx114 * dx114 + dy114 * dy114 + dz114 * dz114;
+    L[:,2,1] = 2.0 *  (dx114 * dx214 + dy114 * dy214 + dz114 * dz214);
+    L[:,2,2] =        dx214 * dx214 + dy214 * dy214 + dz214 * dz214;
+    L[:,2,3] = 2.0 *  (dx114 * dx314 + dy114 * dy314 + dz114 * dz314);
+    L[:,2,4] = 2.0 *  (dx214 * dx314 + dy214 * dy314 + dz214 * dz314);
+    L[:,2,5] =        dx314 * dx314 + dy314 * dy314 + dz314 * dz314;
+    L[:,2,6] = 2.0 *  (dx114 * dx414 + dy114 * dy414 + dz114 * dz414);
+    L[:,2,7] = 2.0 *  (dx214 * dx414 + dy214 * dy414 + dz214 * dz414);
+    L[:,2,8] = 2.0 *  (dx314 * dx414 + dy314 * dy414 + dz314 * dz414);
+    L[:,2,9] =       dx414 * dx414 + dy414 * dy414 + dz414 * dz414;
+
+    L[:,3,0] =        dx123 * dx123 + dy123 * dy123 + dz123 * dz123;
+    L[:,3,1] = 2.0 *  (dx123 * dx223 + dy123 * dy223 + dz123 * dz223);
+    L[:,3,2] =        dx223 * dx223 + dy223 * dy223 + dz223 * dz223;
+    L[:,3,3] = 2.0 *  (dx123 * dx323 + dy123 * dy323 + dz123 * dz323);
+    L[:,3,4] = 2.0 *  (dx223 * dx323 + dy223 * dy323 + dz223 * dz323);
+    L[:,3,5] =        dx323 * dx323 + dy323 * dy323 + dz323 * dz323;
+    L[:,3,6] = 2.0 *  (dx123 * dx423 + dy123 * dy423 + dz123 * dz423);
+    L[:,3,7] = 2.0 *  (dx223 * dx423 + dy223 * dy423 + dz223 * dz423);
+    L[:,3,8] = 2.0 *  (dx323 * dx423 + dy323 * dy423 + dz323 * dz423);
+    L[:,3,9] =       dx423 * dx423 + dy423 * dy423 + dz423 * dz423;
+
+    L[:,4,0] =        dx124 * dx124 + dy124 * dy124 + dz124 * dz124;
+    L[:,4,1] = 2.0 *  (dx124 * dx224 + dy124 * dy224 + dz124 * dz224);
+    L[:,4,2] =        dx224 * dx224 + dy224 * dy224 + dz224 * dz224;
+    L[:,4,3] = 2.0 * ( dx124 * dx324 + dy124 * dy324 + dz124 * dz324);
+    L[:,4,4] = 2.0 * (dx224 * dx324 + dy224 * dy324 + dz224 * dz324);
+    L[:,4,5] =        dx324 * dx324 + dy324 * dy324 + dz324 * dz324;
+    L[:,4,6] = 2.0 * ( dx124 * dx424 + dy124 * dy424 + dz124 * dz424);
+    L[:,4,7] = 2.0 * ( dx224 * dx424 + dy224 * dy424 + dz224 * dz424);
+    L[:,4,8] = 2.0 * ( dx324 * dx424 + dy324 * dy424 + dz324 * dz424);
+    L[:,4,9] =       dx424 * dx424 + dy424 * dy424 + dz424 * dz424;
+
+    L[:,5,0] =        dx134 * dx134 + dy134 * dy134 + dz134 * dz134;
+    L[:,5,1] = 2.0 * ( dx134 * dx234 + dy134 * dy234 + dz134 * dz234);
+    L[:,5,2] =        dx234 * dx234 + dy234 * dy234 + dz234 * dz234;
+    L[:,5,3] = 2.0 * ( dx134 * dx334 + dy134 * dy334 + dz134 * dz334);
+    L[:,5,4] = 2.0 * ( dx234 * dx334 + dy234 * dy334 + dz234 * dz334);
+    L[:,5,5] =        dx334 * dx334 + dy334 * dy334 + dz334 * dz334;
+    L[:,5,6] = 2.0 *  (dx134 * dx434 + dy134 * dy434 + dz134 * dz434);
+    L[:,5,7] = 2.0 *  (dx234 * dx434 + dy234 * dy434 + dz234 * dz434);
+    L[:,5,8] = 2.0 *  (dx334 * dx434 + dy334 * dy434 + dz334 * dz434);
+    L[:,5,9] =       dx434 * dx434 + dy434 * dy434 + dz434 * dz434;
+
+    return L
+
+# so we don't use cw here since we use the same control points in the world system
+# but if you don't do this, you must change rho accordingly using cw
+#
+#INPUT:
+# cw            (4x4)
+#OUTPUT:
+# rho           (6)
+def compute_rho(cw):
+
+    rho = torch.zeros(6);
+    rho[0] = 2
+    rho[1] = 2
+    rho[2] = 1
+    rho[3] = 2
+    rho[4] = 1
+    rho[5] = 1
+    return rho
+
+def computeJacobian(current_betas,rho,L):
+
+    M = current_betas.shape[0]
+    A = torch.zeros((M,6,4))
+    b = torch.zeros((M,6))
+    B = torch.zeros((M,10))
+
+    cb = current_betas
+
+    B[:,0] = cb[:,0] * cb[:,0]
+    B[:,1] = cb[:,0] * cb[:,1]
+    B[:,2] = cb[:,1] * cb[:,1]
+    B[:,3] = cb[:,0] * cb[:,2]
+    B[:,4] = cb[:,1] * cb[:,2]
+    B[:,5] = cb[:,2] * cb[:,2]
+    B[:,6] = cb[:,0] * cb[:,3]
+    B[:,7] = cb[:,1] * cb[:,3]
+    B[:,8] = cb[:,2] * cb[:,3]
+    B[:,9] = cb[:,3] * cb[:,3]
+
+    A[:,0,0]=2*cb[:,0]*L[:,0,0]+cb[:,1]*L[:,0,1]+cb[:,2]*L[:,0,3]+cb[:,3]*L[:,0,6];
+    A[:,0,1]=cb[:,0]*L[:,0,1]+2*cb[:,1]*L[:,0,2]+cb[:,2]*L[:,0,4]+cb[:,3]*L[:,0,7];
+    A[:,0,2]=cb[:,0]*L[:,0,3]+cb[:,1]*L[:,0,4]+2*cb[:,2]*L[:,0,5]+cb[:,3]*L[:,0,8];
+    A[:,0,3]=cb[:,0]*L[:,0,6]+cb[:,1]*L[:,0,7]+cb[:,2]*L[:,0,8]+2*cb[:,3]*L[:,0,9];
+    b[:,0] = rho[0]-torch.bmm(L[:,0,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    A[:,1,0]=2*cb[:,0]*L[:,1,0]+cb[:,1]*L[:,1,1]+cb[:,2]*L[:,1,3]+cb[:,3]*L[:,1,6];
+    A[:,1,1]=cb[:,0]*L[:,1,1]+2*cb[:,1]*L[:,1,2]+cb[:,2]*L[:,1,4]+cb[:,3]*L[:,1,7];
+    A[:,1,2]=cb[:,0]*L[:,1,3]+cb[:,1]*L[:,1,4]+2*cb[:,2]*L[:,1,5]+cb[:,3]*L[:,1,8];
+    A[:,1,3]=cb[:,0]*L[:,1,6]+cb[:,1]*L[:,1,7]+cb[:,2]*L[:,1,8]+2*cb[:,3]*L[:,1,9];
+    b[:,1] = rho[1]-torch.bmm(L[:,1,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    A[:,2,0]=2*cb[:,0]*L[:,2,0]+cb[:,1]*L[:,2,1]+cb[:,2]*L[:,2,3]+cb[:,3]*L[:,2,6];
+    A[:,2,1]=cb[:,0]*L[:,2,1]+2*cb[:,1]*L[:,2,2]+cb[:,2]*L[:,2,4]+cb[:,3]*L[:,2,7];
+    A[:,2,2]=cb[:,0]*L[:,2,3]+cb[:,1]*L[:,2,4]+2*cb[:,2]*L[:,2,5]+cb[:,3]*L[:,2,8];
+    A[:,2,3]=cb[:,0]*L[:,2,6]+cb[:,1]*L[:,2,7]+cb[:,2]*L[:,2,8]+2*cb[:,3]*L[:,2,9];
+    b[:,2] = rho[2]-torch.bmm(L[:,2,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    A[:,3,0]=2*cb[:,0]*L[:,3,0]+cb[:,1]*L[:,3,1]+cb[:,2]*L[:,3,3]+cb[:,3]*L[:,3,6];
+    A[:,3,1]=cb[:,0]*L[:,3,1]+2*cb[:,1]*L[:,3,2]+cb[:,2]*L[:,3,4]+cb[:,3]*L[:,3,7];
+    A[:,3,2]=cb[:,0]*L[:,3,3]+cb[:,1]*L[:,3,4]+2*cb[:,2]*L[:,3,5]+cb[:,3]*L[:,3,8];
+    A[:,3,3]=cb[:,0]*L[:,3,6]+cb[:,1]*L[:,3,7]+cb[:,2]*L[:,3,8]+2*cb[:,3]*L[:,3,9];
+    b[:,3] = rho[3]-torch.bmm(L[:,3,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    A[:,4,0]=2*cb[:,0]*L[:,4,0]+cb[:,1]*L[:,4,1]+cb[:,2]*L[:,4,3]+cb[:,3]*L[:,4,6];
+    A[:,4,1]=cb[:,0]*L[:,4,1]+2*cb[:,1]*L[:,4,2]+cb[:,2]*L[:,4,4]+cb[:,3]*L[:,4,7];
+    A[:,4,2]=cb[:,0]*L[:,4,3]+cb[:,1]*L[:,4,4]+2*cb[:,2]*L[:,4,5]+cb[:,3]*L[:,4,8];
+    A[:,4,3]=cb[:,0]*L[:,4,6]+cb[:,1]*L[:,4,7]+cb[:,2]*L[:,4,8]+2*cb[:,3]*L[:,4,9];
+    b[:,4] = rho[4]-torch.bmm(L[:,4,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    A[:,5,0]=2*cb[:,0]*L[:,5,0]+cb[:,1]*L[:,5,1]+cb[:,2]*L[:,5,3]+cb[:,3]*L[:,5,6];
+    A[:,5,1]=cb[:,0]*L[:,5,1]+2*cb[:,1]*L[:,5,2]+cb[:,2]*L[:,5,4]+cb[:,3]*L[:,5,7];
+    A[:,5,2]=cb[:,0]*L[:,5,3]+cb[:,1]*L[:,5,4]+2*cb[:,2]*L[:,5,5]+cb[:,3]*L[:,5,8];
+    A[:,5,3]=cb[:,0]*L[:,5,6]+cb[:,1]*L[:,5,7]+cb[:,2]*L[:,5,8]+2*cb[:,3]*L[:,5,9];
+    b[:,5] = rho[5]-torch.bmm(L[:,5,:].view((M,1,10)),B.view((M,10,1))).squeeze();
+
+    return A,b
+
+def sign_determinant(c):
+
+    c0 = c[:,:,0]
+    c1 = c[:,:,1]
+    c2 = c[:,:,2]
+    c3 = c[:,:,3]
+
+    v1 = c0 - c3
+    v2 = c1 - c3
+    v3 = c2 - c3
+    M = torch.stack((v1,v2,v3),2)
+    signs = torch.sign(torch.det(M))
+
+    return signs
 
 def Rx(x):
     batchsize = x.shape[0]
@@ -515,7 +844,6 @@ def predict(s,R,T,alphas,betas):
     shape = create3DMM(alphas,betas)
     shape = align(shape,s,R,T)
     shape = project(shape)
-
     return shape
 
 # visualize 2d points
@@ -523,11 +851,72 @@ def drawpts(img, pts, color=[255,255,255]):
 
     for p in pts:
         cv2.circle(img,(int(p[0]),int(p[1])),1,color,-1)
-
     cv2.imshow('img',img)
     cv2.waitKey(0)
 
     return img
+
+# epnp algorithm to solve for camera pose with gauss newton
+def EPnP(x_img,x_w,K):
+    f = K[0,0]
+    px = K[0,2]
+    py = K[1,2]
+
+    # get control points
+    c_w = getControlPoints(x_w)
+
+    # solve alphas
+    alphas = solveAlphas(x_w,c_w)
+    Matrix = setupM(alphas,x_img.permute(0,2,1),px,py,f)
+
+    # get last 4 eigenvectors
+    u,d,v = torch.svd(Matrix)
+    km = v[:,:,-4:]
+
+    # sovle N=1
+    beta_n1 = torch.zeros((100,4))
+    beta_n1[:,3] = 1
+    c_c_n1 = km[:,:,-1].reshape((100,4,3)).permute(0,2,1)
+    _, x_c_n1,s1 = scaleControlPoints(c_c_n1,c_w[:3,:],alphas,x_w)
+    Rn1, Tn1 = getExtrinsics(x_c_n1,x_w)
+    reproj_error2_n1 = getReprojError2(x_img,x_w,Rn1,Tn1,K)
+    #reproj_error3_n1 = getReprojError3(x_cam_gt,x_w,Rn1,Tn1)
+    #rel_error_n1 = getRelReprojError3(x_cam_gt,x_w,Rn1,Tn1)
+
+    # solve N=2
+    d12, d13, d14, d23, d24, d34 = getDistances(c_w)
+    distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
+    betasq_n2 = getBetaN2(km[:,:,-2:],distances).squeeze()
+    b1_n2 = torch.sqrt(torch.abs(betasq_n2[:,0]))
+    b2_n2 = torch.sqrt(torch.abs(betasq_n2[:,2])) * torch.sign(betasq_n2[:,1]) * torch.sign(betasq_n2[:,0])
+    beta_n2 = torch.zeros((100,4))
+    beta_n2[:,2] = b1_n2
+    beta_n2[:,3] = b2_n2
+    c_c_n2 = getControlPointsN2(km[:,:,-2:],beta_n2)
+    _,x_c_n2,s2 = scaleControlPoints(c_c_n2,c_w[:3,:],alphas,x_w)
+    Rn2,Tn2 = getExtrinsics(x_c_n2,x_w)
+    reproj_error2_n2 = getReprojError2(x_img,x_w,Rn2,Tn2,K)
+
+    s = torch.stack((s1,s2))
+
+    # determine best solution in terms of 2d reprojection
+    mask = reproj_error2_n1 > reproj_error2_n2
+    mask = mask.long()
+    betas = torch.stack((beta_n1,beta_n2))
+    best_betas = betas.gather(0,torch.stack(4*[mask],dim=1).unsqueeze(0)).squeeze()
+    best_scale = s.gather(0,mask.unsqueeze(0)).squeeze()
+    scaled_betas = best_betas / best_scale.unsqueeze(1)
+
+    # optimize initial guess
+    xc_opt, iter = optimize_betas_gauss_newton(km,c_w,scaled_betas,alphas,x_w,x_img,K)
+
+    # fix the sign
+    xc_opt = xc_opt * torch.sign(xc_opt[:,2,:].sum(1)).unsqueeze(-1).unsqueeze(-1)
+
+    # get the extrinsics
+    r_opt,t_opt = getExtrinsics(xc_opt.permute(0,2,1),x_w)
+
+    return xc_opt, r_opt, t_opt
 
 # solve rotation translation
 
@@ -535,8 +924,69 @@ if __name__ == '__main__':
 
     import dataloader
 
-    facemodel = dataloader.Face3DMM()
+    #facemodel = dataloader.Face3DMM()
+    M = 100;
+    N = 68;
+    synth = dataloader.TestLoader(400)
+    sequence = synth[0]
+    x_cam_gt = sequence['x_cam_gt']
+    x_w_gt = sequence['x_w_gt']
+    f_gt = sequence['f_gt']
+    x_img = sequence['x_img']
+    data3dmm = dataloader.SyntheticLoader()
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
+    shape = mu_lm
+    shape[:,2] = shape[:,2] * -1;
 
+    one  = torch.ones(M,1,68)
+    x_img_one = torch.cat([x_img,one],dim=1)
+
+    #f = torch.relu(out[:,199]).mean()
+    error2d = []
+    error3d = []
+    fvals = []
+    f_gt = 400
+    for diff in np.linspace(-200,200,20):
+        K = torch.zeros((3,3)).float()
+        f = f_gt + diff
+        fvals.append(f)
+        K[0,0] = f;
+        K[1,1] = f;
+        K[2,2] = 1;
+        K[0,2] = 320;
+        K[1,2] = 240;
+        px = 320;
+        py = 240;
+
+        # get control points
+        Xc, R, T = EPnP(x_img,shape,K)
+
+        reproj_error2 = getReprojError2(x_img,shape,R,T,K)
+        reproj_error3 = getReprojError3(x_cam_gt,shape,R,T)
+        rel_error = getRelReprojError3(x_cam_gt,shape,R,T)
+
+        error2d.append(reproj_error2.mean().item())
+        error3d.append(rel_error.mean().item())
+
+    data = {}
+    data['fvals'] = np.array(fvals)
+    data['error2d'] = np.array(error2d)
+    data['error3d'] = np.array(error3d)
+
+    print(fvals)
+    print(error2d)
+    print(error3d)
+
+    import scipy.io
+    scipy.io.savemat('exp4.mat',data)
+    quit()
+
+    print(torch.mean(reproj_error2))
+    print(torch.mean(reproj_error3))
+    print(torch.mean(rel_error))
+    quit()
+
+    '''
     mu_s = facemodel.mu_shape
     mu_exp = facemodel.mu_exp
     s_eigen = facemodel.shape_eigenvec
@@ -564,3 +1014,4 @@ if __name__ == '__main__':
 
     import scipy.io
     scipy.io.savemat('pts.mat',{'pts': pts})
+    '''

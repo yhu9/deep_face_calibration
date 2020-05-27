@@ -6,6 +6,7 @@ import torch
 from skimage import io, transform
 import scipy.io
 from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Slerp
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -65,6 +66,7 @@ class TestLoader(Dataset):
         R = tmp['R']
         T = tmp['T']
         f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
+        d = np.mean(T[:,2])
 
         sample = {}
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
@@ -72,8 +74,46 @@ class TestLoader(Dataset):
         sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
         sample['x_img_gt'] = torch.from_numpy(x_img_gt).float().permute(0,2,1)
         sample['f_gt'] = torch.Tensor(f).float()
+        sample['d_gt'] = torch.Tensor([d]).float()
+        sample['T_gt'] = T
 
         return sample
+
+class BIWILoader(Dataset):
+
+    def __init__(self):
+        self.root_dir = "../data/kinect_head_pose_db/matdata/"
+        subjects = [f"{sub:02d}" for sub in range(1,25)]
+        return
+
+    def __len__(self):
+        return 24
+
+    def __getitem__(self,idx):
+
+        if idx == 0: idx = idx+1;
+        file = f"sub{idx:02d}.mat"
+        full_path = os.path.join(self.root_dir,file)
+        data = scipy.io.loadmat(full_path)
+
+        tmp = data['sequence'][0,0]
+        x_w = tmp['x_w']
+        x_img = tmp['x_img']
+        x_img_gt = tmp['x_img_gt']
+        x_cam = tmp['x_cam']
+        R = tmp['R']
+        T = tmp['T']
+        f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
+
+        sample = {}
+        sample['x_w_gt'] = torch.from_numpy(x_w).float()
+        sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
+        sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
+        sample['x_img_gt'] = torch.from_numpy(x_img_gt.astype(np.float)).float().permute(0,2,1)
+        sample['f_gt'] = torch.Tensor(f).float()
+
+        return sample
+
 
 class SyntheticLoader(Dataset):
 
@@ -107,15 +147,14 @@ class SyntheticLoader(Dataset):
         # extra boundaries on camera coordinates
         self.w = 640
         self.h = 480
-        self.minx = -160; self.maxx = 160;
-        self.miny = -120; self.maxy = 120;
-        self.minz = 800; self.maxz = 1500;
+        self.minf = 280; self.maxf = 2200
+        self.minz = 380; self.maxz = 3200;
         self.max_rx = 20;
-        self.max_ry = 30; self.max_rz = 20;
+        self.max_ry = 20; self.max_rz = 20;
         self.xstd = 1; self.ystd = 1;
 
     def __len__(self):
-        return 10000
+        return 1000
 
     def __getitem__(self,idx):
 
@@ -125,12 +164,9 @@ class SyntheticLoader(Dataset):
         x_cam = np.zeros((M,68,3));
         x_img = np.zeros((M,68,2));
         x_img_true = np.zeros((M,68,2));
-        Q = np.zeros((M,4));
-        R = np.zeros((M,3,3));
-        T = np.zeros((M,3));
 
         # define intrinsics
-        f = 300 + random.random() * 2500;
+        f = self.minf + random.random() * (self.maxf - self.minf);
         K = np.array([[f,0,320],[ 0,f,240], [0,0,1]])
 
         # create random 3dmm shape
@@ -139,6 +175,7 @@ class SyntheticLoader(Dataset):
         s = np.sum(np.matmul(self.lm_eigenvec,alphas),1)
         s = s.reshape(68,3)
         lm = self.mu_lm + s
+        lm[:,2] = lm[:,2] * -1
         x_w = lm;
 
         # create random 3dmm expression
@@ -147,17 +184,20 @@ class SyntheticLoader(Dataset):
         e = e.reshape(68,3)
         exp = e
 
+        # define depth
+        tz = random.random() * (self.maxz-self.minz) + self.minz
+        minz = np.maximum(tz - 500,self.minz)
+        maxz = np.minimum(tz + 500,self.maxz)
+
         # get initial and final rotation
         while True:
-            q_init = self.generateRandomRotation()
-            q_final = self.generateRandomRotation()
-            t_init = self.generateRandomTranslation()
-            t_final = self.generateRandomTranslation()
-            if np.dot(q_init,q_final) < 0:
-                q_final = q_final * -1
+            r_init, q_init = self.generateRandomRotation()
+            r_final, q_final = self.generateRandomRotation()
+            t_init = self.generateRandomTranslation(K,minz,maxz)
+            t_final = self.generateRandomTranslation(K,minz,maxz)
 
-            ximg_init = self.project2d(q_init,t_init,K,x_w)
-            ximg_final = self.project2d(q_final,t_final,K,x_w)
+            ximg_init = self.project2d(r_init,t_init,K,x_w)
+            ximg_final = self.project2d(r_final,t_final,K,x_w)
             if np.any(np.amin(ximg_init,axis=0) < 0): continue
             if np.any(np.amin(ximg_final,axis=0) < 0): continue
             init = np.amax(ximg_init,axis=0)
@@ -168,10 +208,15 @@ class SyntheticLoader(Dataset):
             if final[1] > 480: continue
             break
 
-        quaternion = np.stack((np.linspace(q_init[0],q_final[0],M),
-                np.linspace(q_init[1],q_final[1],M),
-                np.linspace(q_init[2],q_final[2],M),
-                np.linspace(q_init[3],q_final[3],M))).T
+        d = (t_init[2] + t_final[2]) / 2
+
+        # interpolate quaternion using spherical linear interpolation
+        qs = np.stack((q_init,q_final))
+        Rs = Rotation.from_quat(qs)
+        times = np.linspace(0,1,100)
+        slerper = Slerp([0,1],Rs)
+        rotations = slerper(times)
+        matrices = rotations.as_matrix()
 
         T = np.stack((np.linspace(t_init[0],t_final[0],M),
                 np.linspace(t_init[1],t_final[1],M),
@@ -180,14 +225,7 @@ class SyntheticLoader(Dataset):
         # create each view
         for i in range(M):
             # get rotation
-            q = quaternion[i,:];
-            q = q / np.linalg.norm(q);
-            rx = np.arctan2(2*(q[0]*q[1] + q[2]*q[3]),1-2*(q[1]**2+q[2]**2));
-            ry = np.arcsin(2*(q[0]*q[2] - q[3]*q[1]));
-            rz = np.arctan2(2*(q[0]*q[3] + q[1]*q[2]),1-2*(q[2]**2+q[3]**2));
-            r = Rotation.from_euler('zyx', [rz,ry,rx], degrees=False).as_matrix()
-            Q[i,:] = q;
-            R[i,:,:] = r;
+            r = matrices[i]
 
             # get translation
             t = T[i,:];
@@ -226,38 +264,47 @@ class SyntheticLoader(Dataset):
         return sample
 
     def generateRandomRotation(self):
-        while True:
 
-            q = [np.random.randn(1)[0],np.random.randn(1)[0],np.random.randn(1)[0],np.random.randn(1)[0]]
-            q = q/np.linalg.norm(q)
-            rx = np.arctan2(2*(q[0]*q[1] + q[2]*q[3]),1-2*(q[1]**2+q[2]**2));
-            ry = np.arcsin(2*(q[0]*q[2] - q[3]*q[1]));
-            rz = np.arctan2(2*(q[0]*q[3] + q[1]*q[2]),1-2*(q[2]**2+q[3]**2));
-            x_degree = rx*180/np.pi;
-            y_degree = ry*180/np.pi;
-            z_degree = rz*180/np.pi;
-            if(abs(x_degree) < self.max_rx and abs(y_degree) < self.max_ry and abs(z_degree) < self.max_rz):
-                break
+        ax = self.max_rx;
+        ay = self.max_ry;
+        az = self.max_rz;
+        rx = random.random()*2*ax - ax;
+        ry = random.random()*2*ay - ay;
+        rz = random.random()*2*az - az;
 
-        return q
+        r = Rotation.from_euler('zyx',[rz,ry,rx],degrees=True)
+        q = r.as_quat()
 
-    def generateRandomTranslation(self):
+        return r,q
 
-        xyz = np.random.rand(3)
-        xyz[0] = xyz[0] * (self.maxx - self.minx) + self.minx
-        xyz[1] = xyz[1] * (self.maxy - self.miny) + self.miny
-        xyz[2] = xyz[2] * (self.maxz - self.minz) + self.minz
+    def generateRandomTranslation(self,K,minz,maxz):
 
-        return xyz
+        w = K[0,2]*2;
+        h = K[1,2]*2;
+        xvec = np.array([[w-100],[w/2],[1]])
+        yvec = np.array([[h/2],[h-100],[1]])
+        vz = np.array([[0],[0],[1]]);
+        vx = np.matmul(np.linalg.inv(K),xvec)
+        vy = np.matmul(np.linalg.inv(K),yvec)
+        vx = np.squeeze(vx)
+        vy = np.squeeze(vy)
+        vz = np.array([0,0,1])
+        thetax = np.arctan2(np.linalg.norm(np.cross(vz,vy)),np.dot(vz,vy));
+        thetay = np.arctan2(np.linalg.norm(np.cross(vz,vx)),np.dot(vz,vx));
 
-    def project2d(self,q,t,K,pw):
+        tz = random.random()*(maxz-minz) + minz;
+        maxx = tz * np.tan(thetax);
+        maxy = tz * np.tan(thetay);
+        tx = random.random()*maxx*2 - maxx;
+        ty = random.random()*maxy*2 - maxy;
+        t = [tx,ty,tz];
 
-        q = q/np.linalg.norm(q)
-        rx = np.arctan2(2*(q[0]*q[1] + q[2]*q[3]),1-2*(q[1]**2+q[2]**2));
-        ry = np.arcsin(2*(q[0]*q[2] - q[3]*q[1]));
-        rz = np.arctan2(2*(q[0]*q[3] + q[1]*q[2]),1-2*(q[2]**2+q[3]**2));
-        r = Rotation.from_euler('zyx', [rz,ry,rx], degrees=False).as_matrix()
-        xc = np.matmul(r,pw.T) + np.expand_dims(t,1);
+        return np.array(t)
+
+    def project2d(self,r,t,K,pw):
+
+        R = r.as_matrix()
+        xc = np.matmul(R,pw.T) + np.expand_dims(t,1);
 
         proj = np.matmul(K,xc)
         proj = proj / proj[2,:]
@@ -332,6 +379,12 @@ class ToTensor(object):
 
 # UNIT TESTING
 if __name__ == '__main__':
+    '''
+    loader = BIWILoader()
+    sample = loader[1]
+    print("sample made")
+    print(sample.keys())
+    '''
 
     loader = SyntheticLoader()
 
