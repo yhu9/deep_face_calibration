@@ -1,9 +1,21 @@
 
 import math
 
+import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import cv2
+import pptk
+
+def init_weights(m):
+    if type(m) == torch.nn.Linear:
+        torch.nn.init.xavier_uniform_(m.weight)
+        #m.weight.data.fill_(0.00)
+        m.bias.data.fill_(0.00)
+    if type(m) == torch.nn.Conv1d:
+        torch.nn.init.xavier_uniform_(m.weight)
+        #m.weight.data.fill_(0.00)
+        m.bias.data.fill_(0.00)
 
 # control points set as arbitrary basis vector in R4
 #Input:
@@ -237,16 +249,26 @@ def getExtrinsics(x_c,p_w):
         tmpM = torch.bmm(m1,m2)
         Matrix[i] = torch.sum(tmpM,dim=0)
 
-    # solve R
-    u_double,d,v_double = torch.svd(Matrix.double())
-    u = u_double.float()
-    v = v_double.float()
-    r = torch.bmm(u,v.permute(0,2,1))
+    u,d,v = torch.svd(Matrix)
 
-    rdet = torch.det(r)
-    redetmask = (rdet < 0).float() * -2 + 1
-    redetmask = redetmask.detach()
-    R = r * redetmask.unsqueeze(1).unsqueeze(1)
+    '''
+    try:
+        u,d,v = torch.svd(Matrix)
+        mask = torch.ones(M,dtype=torch.bool)
+    except:
+        mask = Matrix == Matrix
+        mask = torch.all(mask.reshape(M,-1),axis=-1)
+        u,d,v = torch.svd(Matrix[mask])
+        M = torch.sum(mask.long()).item()
+        print(M)
+    '''
+
+    R = torch.bmm(u,v.permute(0,2,1))
+
+    #rdet = torch.det(r)
+    #redetmask = (rdet < 0).float() * -2 + 1
+    #redetmask = redetmask.detach()
+    #R = r * redetmask.unsqueeze(1).unsqueeze(1)
 
     # solve T using centers
     rep_w_center = torch.stack(M * [w_center]).unsqueeze(2)
@@ -266,7 +288,7 @@ def getExtrinsics(x_c,p_w):
 #
 #OUTPUT:
 #   error               (M)
-def getReprojError2(pimg,pw,R,T,A):
+def getReprojError2(pimg,pw,R,T,A,show=False,loss='l2'):
 
     M = pimg.shape[0]
     N = pimg.shape[1]
@@ -275,10 +297,48 @@ def getReprojError2(pimg,pw,R,T,A):
     proj = torch.bmm(torch.stack(M*[A]),pct)
     proj_img = proj / proj[:,-1,:].unsqueeze(1)
 
-
     pimg_pred = proj_img[:,:2,:]
     diff = pimg - pimg_pred
-    error  = torch.mean(torch.norm(diff,p=2,dim=1),dim=1)
+    if loss == 'l2':
+        error  = torch.norm(diff,p=2,dim=1).mean(1)
+    elif loss == 'l1':
+        error = torch.abs(diff)
+
+    if show:
+        import pptk
+        x = pct[-1].T.detach().cpu().numpy()
+        v = pptk.viewer(x)
+        v.set(point_size=1.1)
+        pct[0].T
+        #for i in range(M):
+        #    pt1 = pimg[i].T.cpu().numpy()
+        #    scatter(pt1)
+        pta = pimg[0].T.cpu().numpy()
+        ptb = pimg[-1].T.cpu().numpy()
+        ptc = pimg_pred[0].detach().T.cpu().numpy()
+        ptd = pimg_pred[-1].detach().T.cpu().numpy()
+        plt.scatter(pta[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        plt.scatter(ptb[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        plt.scatter(pta[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+        plt.scatter(ptb[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+
+        plt.xlim((-320,320))
+        plt.ylim((-240,240))
+        plt.show()
+
+        quit()
+
+    return error
+
+def getError2(pimg,pcam,A,show=False):
+    M = pimg.shape[0]
+    N = pimg.shape[1]
+
+    proj = torch.bmm(torch.stack(M*[A]),pcam)
+    proj = proj_img = proj / proj[:,-1,:].unsqueeze(1)
+    pimg_pred = proj_img[:,:2,:]
+    diff = pimg - pimg_pred
+    error = torch.mean(torch.norm(diff,p=2,dim=1),dim=1)
 
     return error
 
@@ -298,12 +358,149 @@ def getReprojError3(xcam,pw,R,T):
     M = xcam.shape[0]
     pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
     pct = pc + T.unsqueeze(2)
-
     diff = pct - xcam
-
     error  = torch.mean(torch.norm(diff,p=2,dim=1),dim=1)
 
     return error
+
+def getReprojError(xcam,pw,R,T):
+    M = xcam.shape[0]
+    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+
+    error = torch.mean(torch.abs(pct - xcam))
+
+    return error
+
+#xcam = torch.Size([16, 3, 6800])
+#ximg = torch.Size([16, 6800, 3])
+#kinv = torch.Size([16, 3, 3])
+def getPCError(xcam,ximg,kinv,mode='l1'):
+
+    #torch.set_printoptions(profile='full')
+    M = xcam.shape[0]
+    proj = torch.bmm(kinv,ximg.permute(0,2,1))
+
+    xcam_pred = proj*xcam[:,2,:].unsqueeze(1)
+    if mode == 'l1':
+        return torch.nn.functional.l1_loss(xcam_pred[:,:2,:],xcam[:,:2,:])
+    else:
+        return torch.nn.functional.mse_loss(xcam_pred[:,:2,:],xcam[:,:2,:])
+
+#INPUT
+# pI        (b,M*N,3)
+# pW        (b,N,3)
+# pC        (b,3,M*N)
+# kinv      (b,3,3)
+#OUTPUT
+# scalar
+def getShapeError(pI,pW,pC,kinv):
+
+    b = pI.shape[0]
+    N = pW.shape[1]
+    M = pI.shape[1] // N
+
+    pI_proj = torch.bmm(kinv,pI.permute(0,2,1))
+    z = pC[:,2,:].unsqueeze(1)
+    pC_proj = pI_proj * z
+
+    le_gt = torch.mean(pW[:,36:42,:],dim=1)
+    re_gt = torch.mean(pW[:,42:48,:],dim=1)
+    #d_gt = torch.sum(torch.pow(le_gt - re_gt,2),dim=1)
+    d_gt = torch.norm(le_gt - re_gt,dim=1)
+    proj = pC_proj.permute(0,2,1).reshape(b,M,N,3)
+
+    le = torch.mean(proj[:,:,36:42,:],dim=-2)
+    re = torch.mean(proj[:,:,42:48,:],dim=-2)
+    #d = torch.sum(torch.pow(le - re,2),dim=2)
+    d = torch.norm(le - re,dim=2)
+
+    error = torch.mean(torch.abs(d - d_gt.unsqueeze(1)))
+
+    return error
+
+#INPUT
+# pI        (M,2,N)
+# pC        (M,3,N)
+def solvef(pI,pC):
+    M = pI.shape[0]
+    N = pI.shape[2]
+    fx = (pC[:,2,:] / pC[:,0,:]) * (pI[:,0,:] - 1)
+    fy = (pC[:,2,:] / pC[:,1,:])* (pI[:,1,:] - 1)
+    f = torch.cat([fx,fy]).mean()
+    return f
+
+#xcam = torch.Size([16, 3, 6800])
+#ximg = torch.Size([16, 6800, 3])
+#kinv = torch.Size([16, 3, 3])
+def getRelPCError(xcam,ximg,kinv,mode='l1'):
+
+    #torch.set_printoptions(profile='full')
+    M = xcam.shape[0]
+    proj = torch.bmm(kinv,ximg.permute(0,2,1))
+
+    xcam_pred = proj*xcam[:,2,:].unsqueeze(1)
+    diff = xcam_pred[:,:2,:] - xcam[:,:2,:]
+    if mode == 'l1':
+        l1_reldiff = torch.mean(torch.abs(diff) / xcam[:,2,:])
+        return l1_reldiff
+    else:
+        l2_reldiff = torch.mean(torch.log(torch.sum(torch.pow(diff,2),1) / torch.pow(xcam[:,2,:],2)))
+        return l2_reldiff
+
+#INPUT:
+# T     (M,3)
+#OUTPUT:
+# SCALAR
+def getTConsistency(T):
+
+    t1 = T[1:]
+    t2 = T[:-1]
+
+    error = torch.mean(torch.sum(torch.pow(t1 - t2,2),1))
+
+    return error
+
+#INPUT:
+# R     (M,3,3)
+#OUTPUT:
+# SCALAR
+def getRConsistency(R):
+
+    r1 = R[1:]
+    r2 = R[:-1]
+
+    error = torch.mean(torch.pow(r1 - r2,2))
+    return error
+
+#INPUT:
+# pI        (M,2,N)
+# pW        (N,3)
+# kinv      (3,3)
+# R         (M,3,3)
+# T         (M,3)
+#OUTPUT:
+# SCALAR
+def get3DConsistency(pI,pW,kinv,R,T):
+    M = pI.shape[0]
+    N = pI.shape[2]
+
+    pC = torch.bmm(R,torch.stack(M*[pW.T])) + T.unsqueeze(2)
+    z = pC[:,2,:]
+    ones = torch.ones(M,1,N).to(pI.device)
+    pI_h = torch.cat((pI,ones),dim=1)
+    pI_proj = torch.bmm(torch.stack(M*[kinv]),pI_h)
+    pC_proj = pI_proj * z.unsqueeze(1)
+
+    le_gt = torch.mean(pW[36:42,:],dim=0)
+    re_gt = torch.mean(pW[42:48,:],dim=0)
+    d_gt = torch.sum(torch.pow(le_gt - re_gt,2))
+
+    le = torch.mean(pC_proj[0,:,36:42],dim=1)
+    re = torch.mean(pC_proj[0,:,42:48],dim=1)
+    d = torch.sum(torch.pow(le - re,2))
+
+    return torch.abs(d - d_gt)
 
 # batched reprojection error using intrinsics and extrinsics on world coordinates
 #
@@ -336,7 +533,6 @@ def getRelReprojError3(xcam,pw,R,T):
     pptk.viewer(pts)
     quit()
     '''
-
 
     diff = pct - xcam
     d = torch.norm(xcam,p=2,dim=1)
@@ -400,8 +596,8 @@ def getBetaN2(v,d):
     M[:,5,1] = M51
     M[:,5,2] = M52
 
-    mtm_inv_mt = torch.bmm(torch.inverse(torch.bmm(M.permute(0,2,1),M)),M.permute(0,2,1))
-    betas = torch.bmm(mtm_inv_mt,torch.stack(views*[d]).unsqueeze(-1))
+    #mtm_inv_mt = torch.bmm(torch.inverse(torch.bmm(M.permute(0,2,1),M)),M.permute(0,2,1))
+    #betas = torch.bmm(mtm_inv_mt,torch.stack(views*[d]).unsqueeze(-1))
     #mtb[0]
 
     # not sure which would be more stable solution
@@ -412,6 +608,17 @@ def getBetaN2(v,d):
     #Mtb = torch.bmm(M.permute(0,2,1),b.unsqueeze(-1))
     #beta = torch.bmm(MtM_inv,Mtb)
     #beta = torch.bmm(torch.bmm(torch.inverse(MtM), M.permute(0,2,1)),b.unsqueeze(-1))
+
+    # solve lstsq using qr decomposition
+    q,r = torch.qr(M)
+    b = torch.stack(views*[d])
+    qtb = torch.bmm(q.permute(0,2,1),b.unsqueeze(-1))
+    betas = torch.bmm(torch.inverse(r),qtb)
+    #try:
+    #betas = torch.bmm(torch.inverse(r),qtb)
+    #except:
+    #    noise = 1e-4 * r.mean().detach() * torch.rand(r.shape).to(r.device)
+    #    betas = torch.bmm(torch.inverse(r + noise),qtb)
 
     # solve lstsq using svd on batch
     # https://gist.github.com/gngdb/611d8f180ef0f0baddaa539e29a4200e
@@ -452,7 +659,7 @@ def getControlPointsN2(v,beta):
 def optimize_betas_gauss_newton(km, cw, betas, alphas, x_w, x_img, A):
 
     M = km.shape[0]
-    beta_opt, err, iter = gauss_newton(km,cw,betas)
+    beta_opt, err = gauss_newton(km,cw,betas)
 
     # compute control points using optimized betas
     kmsum = beta_opt[:,0].unsqueeze(1)*km[:,:,0] + beta_opt[:,1].unsqueeze(1)*km[:,:,1] + beta_opt[:,2].unsqueeze(1)*km[:,:,2] + beta_opt[:,3].unsqueeze(1)*km[:,:,3]
@@ -467,10 +674,9 @@ def optimize_betas_gauss_newton(km, cw, betas, alphas, x_w, x_img, A):
     rep_alpha = torch.stack(M*[alphas])
     Xc_opt = torch.bmm(cc,rep_alpha)
 
-    return Xc_opt, iter
+    return Xc_opt
 
 def gauss_newton(km,cw,betas):
-
     L = compute_L6_10(km)
     rho = compute_rho(cw)
 
@@ -482,19 +688,36 @@ def gauss_newton(km,cw,betas):
     betas2, _ = gauss_newton_step(betas1,rho,L)
     betas3, _ = gauss_newton_step(betas2,rho,L)
     betas4, _ = gauss_newton_step(betas3,rho,L)
-    betas5, err = gauss_newton_step(betas4,rho,L)
+    betas5, _ = gauss_newton_step(betas4,rho,L)
+    betas6, _ = gauss_newton_step(betas5,rho,L)
+    betas7, _ = gauss_newton_step(betas6,rho,L)
+    betas8, _ = gauss_newton_step(betas7,rho,L)
+    betas9, err = gauss_newton_step(betas8,rho,L)
 
-    iter = torch.stack((betas1,betas2,betas3,betas4,betas5))
-
-    return betas5, err, iter
+    return betas9, err
 
 def gauss_newton_step(betas,rho,L):
     M = betas.shape[0]
     A,b = computeJacobian(betas,rho,L)
     ata = torch.bmm(A.permute(0,2,1),A)
-    ata_inv_at = torch.bmm(torch.inverse(ata),A.permute(0,2,1))
-    dbeta = torch.bmm(ata_inv_at,b.unsqueeze(-1))
-    next_betas = betas.unsqueeze(-1) + dbeta
+    q,r = torch.qr(A)
+    qtb = torch.bmm(q.permute(0,2,1),b.unsqueeze(-1))
+    r_inv = torch.inverse(r)
+    #try:
+    #   r_inv = torch.inverse(r)
+    #except:
+    #    noise = 1e-4*r.mean().detach()*torch.rand(r.shape).to(betas.device)
+    #    r_inv = torch.inverse(r + noise)
+
+    rinv_qtb = torch.bmm(r_inv,qtb)
+    #try:
+    #    ata_inv = torch.inverse(ata)
+    #except:
+    #    ata_inv = torch.inverse(ata + 1e-6*ata.mean()*torch.rand(ata.shape))
+    #ata_inv_at = torch.bmm(ata_inv,A.permute(0,2,1))
+    #ata_inv_at = torch.bmm(torch.inverse(ata),A.permute(0,2,1))
+    #dbeta = torch.bmm(ata_inv_at,b.unsqueeze(-1))
+    next_betas = betas.unsqueeze(-1) + rinv_qtb
 
     error = torch.bmm(b.view((M,1,6)),b.view((M,6,1)))
     return next_betas.squeeze(), error
@@ -508,7 +731,7 @@ def gauss_newton_step(betas,rho,L):
 def compute_L6_10(km):
 
     M = km.shape[0]
-    L = torch.zeros((M,6,10))
+    L = torch.zeros((M,6,10)).to(km.device)
     v1 = km[:,:,0]
     v2 = km[:,:,1]
     v3 = km[:,:,2]
@@ -668,7 +891,7 @@ def compute_L6_10(km):
 # rho           (6)
 def compute_rho(cw):
 
-    rho = torch.zeros(6);
+    rho = torch.zeros(6).to(cw.device);
     rho[0] = 2
     rho[1] = 2
     rho[2] = 1
@@ -679,10 +902,11 @@ def compute_rho(cw):
 
 def computeJacobian(current_betas,rho,L):
 
+    device = current_betas.device
     M = current_betas.shape[0]
-    A = torch.zeros((M,6,4))
-    b = torch.zeros((M,6))
-    B = torch.zeros((M,10))
+    A = torch.zeros((M,6,4)).to(device)
+    b = torch.zeros((M,6)).to(device)
+    B = torch.zeros((M,10)).to(device)
 
     cb = current_betas
 
@@ -856,8 +1080,16 @@ def drawpts(img, pts, color=[255,255,255]):
 
     return img
 
+def scatter(pts,color=[255,0,0]):
+    plt.scatter(pts[:,0],pts[:,1])
+    return
+
 # epnp algorithm to solve for camera pose with gauss newton
+#INPUT:
+# x_img         (M,2,N)
 def EPnP(x_img,x_w,K):
+    M = x_img.shape[0]
+    N = x_img.shape[2]
     f = K[0,0]
     px = K[0,2]
     py = K[1,2]
@@ -867,48 +1099,95 @@ def EPnP(x_img,x_w,K):
 
     # solve alphas
     alphas = solveAlphas(x_w,c_w)
+    if x_img.is_cuda:
+        alphas = alphas.cuda()
     Matrix = setupM(alphas,x_img.permute(0,2,1),px,py,f)
+
+    if ~torch.all(Matrix == Matrix):
+        print(Matrix)
+        print(f)
+        print(x_w)
+    #    quit()
 
     # get last 4 eigenvectors
     u,d,v = torch.svd(Matrix)
+    #try:
+    #    u,d,v = torch.svd(Matrix)
+    #except:
+    #    print(Matrix)
+    #    u,d,v = torch.svd(Matrix + 1e-4*Matrix.mean().detach()*torch.rand(Matrix.shape))
+
     km = v[:,:,-4:]
 
     # sovle N=1
-    beta_n1 = torch.zeros((100,4))
+    beta_n1 = torch.zeros((M,4))
+    if x_img.is_cuda:
+        beta_n1 = beta_n1.cuda()
     beta_n1[:,3] = 1
-    c_c_n1 = km[:,:,-1].reshape((100,4,3)).permute(0,2,1)
+    c_c_n1 = km[:,:,-1].reshape((M,4,3)).permute(0,2,1)
     _, x_c_n1,s1 = scaleControlPoints(c_c_n1,c_w[:3,:],alphas,x_w)
-    Rn1, Tn1 = getExtrinsics(x_c_n1,x_w)
-    reproj_error2_n1 = getReprojError2(x_img,x_w,Rn1,Tn1,K)
-    #reproj_error3_n1 = getReprojError3(x_cam_gt,x_w,Rn1,Tn1)
-    #rel_error_n1 = getRelReprojError3(x_cam_gt,x_w,Rn1,Tn1)
+    mask1 = s1 == s1
+    Rn1, Tn1 = getExtrinsics(x_c_n1[mask1],x_w)
+    reproj_error2_n1 = getReprojError2(x_img[mask1],x_w,Rn1,Tn1,K,loss='l2')
+
+    return km, c_w, beta_n1 / s1.unsqueeze(1), alphas
 
     # solve N=2
     d12, d13, d14, d23, d24, d34 = getDistances(c_w)
     distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
     betasq_n2 = getBetaN2(km[:,:,-2:],distances).squeeze()
     b1_n2 = torch.sqrt(torch.abs(betasq_n2[:,0]))
-    b2_n2 = torch.sqrt(torch.abs(betasq_n2[:,2])) * torch.sign(betasq_n2[:,1]) * torch.sign(betasq_n2[:,0])
-    beta_n2 = torch.zeros((100,4))
+    b2_n2 = torch.sqrt(torch.abs(betasq_n2[:,2])) * torch.sign(betasq_n2[:,1]) * torch.sign(betasq_n2[:,0]).detach()
+    beta_n2 = torch.zeros((M,4))
+    if x_img.is_cuda:
+        beta_n2 = beta_n2.cuda()
     beta_n2[:,2] = b1_n2
     beta_n2[:,3] = b2_n2
     c_c_n2 = getControlPointsN2(km[:,:,-2:],beta_n2)
     _,x_c_n2,s2 = scaleControlPoints(c_c_n2,c_w[:3,:],alphas,x_w)
-    Rn2,Tn2 = getExtrinsics(x_c_n2,x_w)
-    reproj_error2_n2 = getReprojError2(x_img,x_w,Rn2,Tn2,K)
+    mask2 = s2 == s2
+    Rn2,Tn2 = getExtrinsics(x_c_n2[mask2],x_w)
+    reproj_error2_n2 = getReprojError2(x_img[mask2],x_w,Rn2,Tn2,K,loss='l2')
+
+    if torch.any(mask1 != mask2):
+        error1 = torch.zeros(M).to(reproj_error2_n1.device) + 10000
+        error2 = torch.zeros(M).to(reproj_error2_n2.device) + 10000
+        error1[mask1] = reproj_error2_n1
+        error2[mask2] = reproj_error2_n2
+    else:
+        error1 = reproj_error2_n1
+        error2 = reproj_error2_n2
+
 
     s = torch.stack((s1,s2))
 
     # determine best solution in terms of 2d reprojection
-    mask = reproj_error2_n1 > reproj_error2_n2
+    mask = error1 > error2
     mask = mask.long()
     betas = torch.stack((beta_n1,beta_n2))
     best_betas = betas.gather(0,torch.stack(4*[mask],dim=1).unsqueeze(0)).squeeze()
     best_scale = s.gather(0,mask.unsqueeze(0)).squeeze()
     scaled_betas = best_betas / best_scale.unsqueeze(1)
 
-    # optimize initial guess
-    xc_opt, iter = optimize_betas_gauss_newton(km,c_w,scaled_betas,alphas,x_w,x_img,K)
+    return km, c_w, scaled_betas, alphas
+
+# Gauss Newton Optimization on extrinsic
+def optimizeGN(km,c_w,scaled_betas,alphas,x_w,x_img,K):
+    M = km.shape[0]
+    beta_opt, err = gauss_newton(km,c_w,scaled_betas)
+
+    # get camera coordinates
+    kmsum = beta_opt[:,0].unsqueeze(1)*km[:,:,0] + beta_opt[:,1].unsqueeze(1)*km[:,:,1] + beta_opt[:,2].unsqueeze(1)*km[:,:,2] + beta_opt[:,3].unsqueeze(1)*km[:,:,3]
+    c_c = kmsum.reshape((M,4,3)).permute(0,2,1)
+
+    # check sign of the determinent to keep orientation
+    sign1 = torch.sign(torch.det(c_w[:3,:3]))
+    sign2 = sign_determinant(c_c)
+
+    # get extrinsics
+    cc = c_c * (sign1*sign2).unsqueeze(1).unsqueeze(1)
+    rep_alpha = torch.stack(M*[alphas])
+    xc_opt = torch.bmm(cc,rep_alpha)
 
     # fix the sign
     xc_opt = xc_opt * torch.sign(xc_opt[:,2,:].sum(1)).unsqueeze(-1).unsqueeze(-1)
@@ -916,7 +1195,21 @@ def EPnP(x_img,x_w,K):
     # get the extrinsics
     r_opt,t_opt = getExtrinsics(xc_opt.permute(0,2,1),x_w)
 
-    return xc_opt, r_opt, t_opt
+    return xc_opt, r_opt, t_opt, beta_opt
+
+# scatter 3d points
+def scatter3d(pts):
+    v = pptk.viewer(pts.detach().cpu().numpy())
+    v.set(point_size=0.2)
+    return v
+
+# 3d shape error
+#INPUT:
+# s         (N,3)
+# s_gt      (N,3)
+def getShapeError(s,s_gt):
+    error = torch.mean(torch.norm(s - s_gt,dim=1))
+    return error
 
 # solve rotation translation
 

@@ -6,7 +6,8 @@ import torch
 import torch.optim
 
 from logger import Logger
-from model import CalibrationNet2
+from model import CalibrationNet4
+from model import feature_transform_regularizer
 import dataloader
 import util
 
@@ -27,128 +28,127 @@ def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.lognam
         logger = Logger(logname)
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = CalibrationNet2()
+    model = CalibrationNet4()
     if modelin != "":
+        #model_dict = model.state_dict()
+        #pretrained_dict = torch.load(modelin)
+        #pretrained_dict = {k: v for k,v in pretrained_dict.items() if k in model_dict}
+        #model_dict.update(pretrained_dict)
+        #model.load_state_dict(pretrained_dict)
         model.load_state_dict(torch.load(modelin))
     model.cuda()
+    optimizer = torch.optim.Adam(model.parameters(),lr=1e-1)
+    decay = torch.optim.lr_scheduler.StepLR(optimizer,step_size=2,gamma=0.1)
 
-    data = dataloader.SyntheticLoader()
-    optimizer = torch.optim.Adam(model.parameters(),lr=1e-2)
+    # dataloader
+    data = dataloader.Data()
+    loader = data.batchloader
 
     # mean shape and eigenvectors for 3dmm
-    mu_lm = torch.from_numpy(data.mu_lm).float().cuda()
-    lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float().cuda()
-    #exp_eigenvec = torch.from_numpy(data.exp_eigenvec).float()
+    mu_lm = torch.from_numpy(data.mu_lm).float()#.cuda()
+    mu_lm[:,2] = mu_lm[:,2] * -1
+    shape = mu_lm
+    lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float()#.cuda()
+
     M = data.M
+    N = data.N
 
     # main training loop
     for epoch in itertools.count():
-        for i in range(len(data)):
-            batch = data[i]
+        for j,batch in enumerate(loader):
 
-            # get input and gt values
             optimizer.zero_grad()
+
+            # get the input and gt values
             x_cam_gt = batch['x_cam_gt'].cuda()
             x_w_gt = batch['x_w_gt'].cuda()
-            f_gt = batch['f_gt'].cuda()
+            fgt = batch['f_gt'].cuda()
             beta_gt = batch['beta_gt'].cuda()
-
             x_img = batch['x_img'].cuda()
-            #x_img = batch['x_img_gt'].cuda()
-            one  = torch.ones(100,1,68).cuda()
-            x_img_one = torch.cat([x_img,one],dim=1)
+            #x_img_norm = batch['x_img_norm']
+            x_img_gt = batch['x_img_gt'].cuda()
+            batch_size = fgt.shape[0]
+            x_img_pts = x_img.reshape((batch_size,M,N,2)).permute(0,1,3,2)
+            x = x_img.reshape((batch_size,M,N,2)).permute(0,3,2,1) / 640
+
+            one = torch.ones(batch_size,M*N,1).cuda()
+            x_img_one = torch.cat([x_img,one],dim=2)
+            x_cam_pt = x_cam_gt.permute(0,1,3,2).reshape(batch_size,6800,3)
 
             # run the model
-            batch_out,meanfeat_loss, feat_loss = model(x_img_one)
-            out = batch_out.squeeze()
+            out = model(x)
+            betas = out[:,:199]
+            fout = torch.relu(out[:,199])
+            if torch.any(fout < 1): fout = fout+1
+            #fout = fgt.flatten()
+            #fout = fout + torch.rand(fout.shape).cuda()*300
+            #print(fout)
+            #print(fgt.flatten())
 
-            # evaluate the extrinsics
-            betas = out[:199]
-            f = torch.relu(out[199])
-            K = torch.zeros((3,3)).float().cuda()
-            K[0,0] = f;
-            K[1,1] = f;
-            K[2,2] = 1;
-            K[0,2] = 320;
-            K[1,2] = 240;
+            # setup intrinsic matrix
+            K = torch.zeros((batch_size,3,3)).float().cuda()
+            K[:,0,0] = fout
+            K[:,1,1] = fout
+            K[:,2,2] = 1
 
-            # apply 3DMM model from predicted parameters
-            alpha_matrix = torch.diag(betas)
-            shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
-            s = shape_cov.sum(1).view(68,3)
-            shape = (mu_lm + s)
-            #shape = mu_lm
+            # setup inverse of intrinsic matrix
+            kinv = torch.zeros((batch_size,3,3)).float().cuda()
+            kinv[:,0,0] = 1/fout
+            kinv[:,1,1] = 1/fout
+            kinv[:,2,2] = 1
 
-            # run epnp algorithm
-            # get control points
-            c_w = util.getControlPoints(shape)
+            # get reconstruction error
+            x_cam_gt = x_cam_gt.permute(0,1,3,2).reshape((batch_size,M*N,3))
+            x_cam_gt = x_cam_gt.permute(0,2,1)
 
-            # solve alphas
-            alphas = util.solveAlphas(shape,c_w)
+            error_3d = util.getPCError(x_cam_gt,x_img_one,kinv,mode='l2')
+            #error_3d = util.getRelPCError(x_cam_gt,x_img_one,kinv,mode='l2')
 
-            # setup M
-            px = 320;
-            py = 240;
+            # get reprojection error
+            proj = torch.bmm(K,x_cam_gt)
+            proj = proj / proj[:,2,:].unsqueeze(1)
+            error_2d = torch.mean(torch.abs(proj - x_img_one.permute(0,2,1)))
 
-            Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
-
-            # get eigenvectors of M
-            u,d,v_double = torch.svd(Matrix.double())
-            v = v_double.float()
-
-            #solve N=1
-            c_c_n1 = v[:,:,-1].reshape((100,4,3)).permute(0,2,1)
-            _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
-            Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
-            reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
-            reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
-            relreproj_error3_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
-
-            # solve N=2
-            # get distance contraints
-            d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
-            distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
-            beta_n2 = util.getBetaN2(v[:,:,-2:],distances)
-            c_c_n2 = util.getControlPointsN2(v[:,:,-2:],beta_n2)
-            _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
-            Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
-            reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
-            reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
-            relreproj_error3_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn2,Tn2)
-
-            # objective
-            mask = reproj_error2_n1 < reproj_error2_n2
-            # mask = reproj_error3_n1 < reproj_error3_n2
-            # mask = relreproj_error3_n1 < relreproj_error3_n2
-            reproj_error = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask])).mean()
-            reconstruction_error = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask])).mean()
-            #reconstruction_error = torch.cat((relreproj_error3_n1[mask],relreproj_error3_n2[~mask])).mean()
-
-            # beta error
+            # get beta error
             beta_error = torch.mean(torch.abs(betas - beta_gt))
 
-            # focal length error
-            #f_error = torch.abs(f_gt - f) / f_gt
-            f_error = torch.abs(f_gt - f)
+            #error_f = torch.mean(torch.abs(fout - f_gt.squeeze()) / f_gt.squeeze())
+            #error_f = torch.mean((fout - f_gt.squeeze())**2 / f_gt.squeeze()**2)
+            error_f = torch.mean(torch.abs(fout - fgt.squeeze()))
+            #error_f = torch.mean(torch.abs(fout- fgt.squeeze())/fgt.squeeze())
+            #error_f = torch.nn.functional.mse_loss(fout.unsqueeze(1),f_gt)
 
-            # weight update
-            #loss = f_error + reconstruction_error
-            #loss = f_error*0.1  + beta_error + reproj_error3_n1.mean()*0.1
-            #loss = f_error + reconstruction_error*0.1 + meanfeat_loss*0.1 + beta_error*0.1
-            loss = f_error + reconstruction_error + meanfeat_loss*0.1 + beta_error
+            # get loss
+            #error_2d = torch.mean(torch.stack(reprojection_error))
+            #error_3d = torch.mean(torch.stack(reconstruction_error))
+            #loss = error_f + error_3d
+            #loss = error_3d
+            #loss = error_3d + error_f
+            #loss = error_3d*100 + error_f*0.01 # screen 2
+            #loss = error_3d + error_f      # best
+            loss = error_3d + error_f
+            #loss = error_3d*100 + error_f*0.01 + error_2d #screen 1
+
             loss.backward()
             optimizer.step()
+            #fout.retain_grad()
+            #print(fout)
+            #print(fgt)
+            #print(fout.grad)
+            #quit()
 
             #LOG THE SUMMARIES
             if log:
-                logger.scalar_summary({'rec_error': reconstruction_error.item(), 'f_error': f_error.item(),'rep_error': reproj_error.item(), 'meanfeat_loss': meanfeat_loss.item()})
-                #logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item()})
+                logger.scalar_summary({'degeneracy': ratio.item()})
+                logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item(), 'meanfeat':meanfeat_loss.item()})
                 logger.incStep()
 
-            print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | beta_error: {beta_error.item():.4f} | rec: {reconstruction_error.item():.4f}  | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}  | meanfeat: {meanfeat_loss.item():.4f}")
-            #print(f"epoch/batch {epoch}/{i}  |   Loss: {loss.item():.4f} | rec: {reconstruction_error.item():.4f}  | rep: {reproj_error.item():.4f} | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}   | beta_error: {beta_error.item():.4f}")
+            print(f"epoch/batch {epoch}/{j} | loss: {loss.item():.4f} | beta_error: {beta_error.item():.4f} | rec: {error_3d.item():.3f} | rep: {error_2d.item():.3f} | f_error: {error_f.item():.3f} | fgt/f: {fgt[-1].item():.2f}/{fout[-1].item():.2f}")
+
+        # save model and increment weight decay
         print("saving!")
         torch.save(model.state_dict(), modelout)
+        #decay.step()
 
 
 ####################################################################################3

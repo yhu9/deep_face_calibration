@@ -4,11 +4,12 @@ import argparse
 
 import torch
 import torch.optim
+import numpy as np
+import pptk
+import scipy.io
 
 from logger import Logger
-from model import PointNet
-from model import RNN
-from model import feature_transform_regularizer
+from model import Model1
 import dataloader
 import util
 
@@ -25,105 +26,151 @@ args = parser.parse_args()
 
 def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.logname):
     # define logger
+    #torch.manual_seed(6)
     if log:
         logger = Logger(logname)
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    model = PointNet(k=1+199,feature_transform=False)
-    if modelin != "":
-        model.load_state_dict(torch.load(modelin))
-    model#.cuda()
+    torch.manual_seed(2)
+    calib_model= Model1(k=1,feature_transform=False)
+    sfm_model = Model1(k=199,feature_transform=False)
+    #if modelin != "":
+    #    model.load_state_dict(torch.load(modelin))
+    sfm_model
+    calib_model
+    opt1 = torch.optim.Adam(sfm_model.parameters(),lr=1e-2)
+    opt2 = torch.optim.Adam(calib_model.parameters(),lr=1e-1)
 
-    data = dataloader.SyntheticLoader()
-    optimizer = torch.optim.Adam(model.parameters(),lr=1e-2)
+    # dataloader
+    #data = dataloader.Data()
+    #loader = data.batchloader
+    loader = dataloader.BIWILoader()
 
     # mean shape and eigenvectors for 3dmm
-    mu_lm = torch.from_numpy(data.mu_lm).float()#.cuda()
-    lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float()#.cuda()
-    #exp_eigenvec = torch.from_numpy(data.exp_eigenvec).float()
-
-    M = data.M
+    mu_lm = torch.from_numpy(loader.mu_lm).float()
+    mu_lm[:,2] = mu_lm[:,2] * -1
+    shape = mu_lm.detach()
+    lm_eigenvec = torch.from_numpy(loader.lm_eigenvec).float()
 
     # main training loop
     for epoch in itertools.count():
-        for i in range(len(data)):
-            sequence = data[i]
+        #for j,batch in enumerate(loader):
 
-            # get input and gt values
-            optimizer.zero_grad()
-            x_cam_gt = sequence['x_cam_gt']#.cuda()
-            x_w_gt = sequence['x_w_gt']#.cuda()
-            f_gt = sequence['f_gt']#.cuda()
-            beta_gt = sequence['beta_gt']#.cuda()
+        np.random.seed(2)
+        for j, data in enumerate(loader):
 
-            x_img = sequence['x_img']#.cuda()
-            #x_img = sequence['x_img_gt'].cuda()
-            one  = torch.ones(100,1,68)#.cuda()
+            M = loader.M
+            N = loader.N
+
+            # get the input and gt values
+            x_cam_gt = data['x_cam_gt']
+            x_w_gt = data['x_w_gt']
+            fgt = data['f_gt']
+            x_img = data['x_img']
+            x_img_gt = data['x_img_gt']
+            x_img_pts = x_img.reshape((M,N,2)).permute(0,2,1)
+            one = torch.ones(M*N,1)
             x_img_one = torch.cat([x_img,one],dim=1)
+            x_cam_pt = x_cam_gt.permute(0,2,1).reshape(M*N,3)
+            x = x_img_one.permute(1,0)
 
-            # run the model
-            out, trans, transfeat = model(x_img_one)
-            #feattransform_loss = feature_transform_regularizer(transfeat)*0.001
-            betas = out[:,:199].mean(0)
-            f = torch.mean(torch.relu(out[:,199]))
+            # get initial values for betas and alphas of EPNP
+            ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
 
-            # setup intrinsic matrix
-            K = torch.zeros((3,3)).float()#.cuda()
-            K[0,0] = f;
-            K[1,1] = f;
-            K[2,2] = 1;
-            K[0,2] = 320;
-            K[1,2] = 240;
+            '''
+            K = torch.zeros((3,3)).float().cuda()
+            K[0,0] = fgt[0]
+            K[1,1] = fgt[0]
+            K[2,2] = 1
+            km, c_w, scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+            Xc,R,T, scaled_betas = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+            loss = util.getReprojError2(ptsI,shape,R,T,K,show=False).mean()
+            '''
 
-            # create 3DMM model from predicted parameters
-            alpha_matrix = torch.diag(betas)
-            shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
-            s = shape_cov.sum(1).view(68,3)
-            shape = mu_lm + s
-            shape[:,-1] = shape[:,-1] * -1
+            fvals = []
+            errors = []
+            for iter in itertools.count():
+                opt2.zero_grad()
 
-            # run epnpp using predicted shape and intrinsics
-            Xc,R,T = util.EPnP(x_img,shape,K)
+                # model output
+                #betas,_,_ = model(x.unsqueeze(0))
+                #shape = torch.sum(betas * lm_eigenvec,1)
+                #shape = shape.reshape(68,3) + mu_lm
+                #shape[:,2] = shape[:,2] * -1
 
-            # objective
-            reproj_error2 = util.getReprojError2(x_img,shape,R,T,K)
-            reproj_error3 = util.getReprojError3(x_cam_gt,shape,R,T)
-            rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
+                # model output
+                f,_,_ = calib_model(x.unsqueeze(0))
+                f = torch.nn.functional.leaky_relu(f) + 300
+                K = torch.zeros((3,3)).float()
+                K[0,0] = f
+                K[1,1] = f
+                K[2,2] = 1
 
-            reproj_error = reproj_error2.mean()
-            reconstruction_error = rel_errors.mean()
+                # differentiable pose estimation
+                km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+                Xc, R, T, _ = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+                loss = util.getReprojError2(ptsI,shape,R,T,K).mean()
+                #loss = util.getError2(ptsI,Xc,K).mean()
+                loss.backward()
+                opt2.step()
 
-            # beta error
-            beta_error = torch.mean(torch.abs(betas - beta_gt))
+                errors.append(loss.detach().cpu().item())
+                fvals.append(f.detach().cpu().item())
 
-            # focal length error
-            #f_error = torch.abs(f_gt - f) / f_gt
-            f_error = torch.abs(f_gt - f)
+                data = {}
+                data['ptsI'] = ptsI.detach().cpu().numpy()
+                data['shape'] = shape.detach().cpu().numpy()
+                data['R'] = R.detach().cpu().numpy()
+                data['T'] = T.detach().cpu().numpy()
+                data['Xc'] = Xc.detach().cpu().numpy()
+                data['K'] = K.detach().cpu().numpy()
+                data['fvals'] = np.array(fvals)
+                data['loss'] = np.array(errors)
+                scipy.io.savemat(f"visual/shape{iter:03d}.mat",data)
 
-            # error in standard deviation of each frame
-            meanfeat_loss = torch.mean(torch.abs(out[:,199] - f))
+                print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f}")
 
-            # weight update
-            #loss = f_error + reconstruction_error
-            #loss = f_error*0.01 + reconstruction_error*0.01 + beta_error
-            # loss = f_error*0.01 + beta_error + reconstruction_error*0.01
-            # loss = f_error*0.01 + beta_error + reproj_error+ reconstruction_error*0.01
-            # loss = f_error + reconstruction_error + feattransform_loss
-            #loss = f_error*0.01 + reconstruction_error*0.01 + beta_error
-            loss = reconstruction_error*10 + beta_error + meanfeat_loss * 0.001
-            loss.backward()
-            optimizer.step()
+            # optimize 3d shape
+            v = pptk.viewer([0,0,0])
+            v.set(point_size=1)
+            v.set(lookat=[0,0,0])
+            for iter in itertools.count():
+                opt1.zero_grad()
 
-            #LOG THE SUMMARIES
-            if log:
-                logger.scalar_summary({'degeneracy': ratio.item()})
-                logger.scalar_summary({'rec_error': reconstruction_error.item(),'rep_error':reproj_error.item(), 'f_error': f_error.item(), 'beta_error': beta_error.item(), 'meanfeat':meanfeat_loss.item()})
-                logger.incStep()
+                # model output
+                betas, _, _ = sfm_model(x.unsqueeze(0))
+                shape = torch.sum(betas * lm_eigenvec,1)
+                shape = shape.reshape(68,3) + mu_lm
+                shape[:,2] = shape[:,2] * -1
+                K = torch.zeros((3,3)).float()
+                K[0,0] = 1000
+                K[1,1] = 1000
+                K[2,2] = 1
 
-            print(f"epoch/sequence {epoch}/{i}  |   Loss: {loss.item():.4f} | rec: {reconstruction_error.item():.4f}  | rep: {reproj_error.item():.4f} | f_error: {f_error.item():.4f} | fgt/f: {f_gt.item():.2f}/{f.item():.2f}   | beta_error: {beta_error.item():.4f} | meafeat: {meanfeat_loss.item():.4f}")
+                # EPnP
+                km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+                Xc, R, T, _ = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+                loss = util.getReprojError2(ptsI,shape,R,T,K).mean()
+                loss.backward()
+                opt1.step()
 
-        print("saving!")
-        torch.save(model.state_dict(), modelout)
+                print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {1000}/{fgt[0].item():.1f}")
+
+                data = {}
+                data['shape'] = shape.detach().cpu().numpy()
+                data['mu_lm'] = mu_lm.detach().cpu().numpy()
+                scipy.io.savemat(f"visual/shape{iter:03d}.mat",data)
+
+                #visualize shape
+                v.clear()
+                pts = shape.detach().cpu().numpy()
+                v.load(pts)
+                #if iter == 100: break
+            shape = shape.detach()
+        # save model and increment weight decay
+        #print("saving!")
+        #torch.save(model.state_dict(), modelout)
+        #decay.step()
 
 
 ####################################################################################3

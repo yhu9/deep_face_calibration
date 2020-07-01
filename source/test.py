@@ -24,12 +24,14 @@ args = parser.parse_args()
 def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
-    model
+    model.eval()
 
     # load 3dmm data
     data3dmm = dataloader.SyntheticLoader()
     mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
     lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float()
+    shape = mu_lm
+    shape[:,2] = shape[:,2] * -1
 
     loader = dataloader.BIWILoader()
     seterror_3d = []
@@ -38,7 +40,6 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
     seterror_2d = []
     for sub in range(len(loader)):
         batch = loader[sub]
-
 
         x_cam_gt = batch['x_cam_gt']
         x_w_gt = batch['x_w_gt']
@@ -60,61 +61,16 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
         K[2,2] = 1;
         K[0,2] = 320;
         K[1,2] = 240;
+        Xc,R,T = util.EPnP(x_img,shape,K)
 
         # apply 3DMM model from predicted parameters
-        alpha_matrix = torch.diag(alphas)
-        shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
-        s = shape_cov.sum(1).view(68,3)
-        shape = (mu_lm + s)
-        shae[:,2] = shape[:,2]*-1
+        reproj_errors2 = util.getReprojError2(x_img,shape,R,T,K)
+        reproj_errors3 = util.getReprojError3(x_cam_gt,shape,R,T)
+        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
 
-        # run epnp algorithm
-        # get control points
-        c_w = util.getControlPoints(shape)
-
-        # solve alphas
-        alphas = util.solveAlphas(shape,c_w)
-
-        # setup M
-        px = 320;
-        py = 240;
-
-        Matrix = util.setupM(alphas,x_img.permute(0,2,1),px,py,f)
-
-        # get eigenvectors of M for each view
-        u,d,v = torch.svd(Matrix)
-
-        #solve N=1
-        c_c_n1 = v[:,:,-1].reshape((M,4,3)).permute(0,2,1)
-        _ , x_c_n1, _ = util.scaleControlPoints(c_c_n1,c_w[:3,:],alphas,shape)
-        Rn1,Tn1 = util.getExtrinsics(x_c_n1,shape)
-        reproj_error2_n1 = util.getReprojError2(x_img,shape,Rn1,Tn1,K)
-        reproj_error3_n1 = util.getReprojError3(x_cam_gt,shape,Rn1,Tn1)
-        rel_error_n1 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
-
-        # solve N=2
-        # get distance contraints
-        d12,d13,d14,d23,d24,d34 = util.getDistances(c_w)
-        distances = torch.stack([d12,d13,d14,d23,d24,d34])**2
-        beta_n2 = util.getBetaN2(v[:,:,-2:],distances)
-        c_c_n2 = util.getControlPointsN2(v[:,:,-2:],beta_n2)
-        _,x_c_n2,_ = util.scaleControlPoints(c_c_n2,c_w[:3,:],alphas,shape)
-        Rn2,Tn2 = util.getExtrinsics(x_c_n2,shape)
-        reproj_error2_n2 = util.getReprojError2(x_img,shape,Rn2,Tn2,K)
-        reproj_error3_n2 = util.getReprojError3(x_cam_gt,shape,Rn2,Tn2)
-        rel_error_n2 = util.getRelReprojError3(x_cam_gt,shape,Rn1,Tn1)
-
-        mask = reproj_error2_n1 < reproj_error2_n2
-
-
-        reproj_errors = torch.cat((reproj_error2_n1[mask],reproj_error2_n2[~mask]))
-        rmse_errors = torch.cat((reproj_error3_n1[mask],reproj_error3_n2[~mask]))
-        rel_errors = torch.cat((rel_error_n2[~mask],rel_error_n1[mask]))
-
-        # errors
-        reproj_error = torch.mean(reproj_errors)
-        reconstruction_error = torch.mean(rmse_errors)
-        rel_error = torch.mean(rel_errors)
+        reproj_error = reproj_errors2.mean()
+        reconstruction_error = reproj_errors3.mean()
+        rel_error = rel_errors.mean()
         f_error = torch.abs(f_gt - f) / f_gt
 
         seterror_2d.append(reproj_error.cpu().data.item())
@@ -142,21 +98,22 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
     # define model, dataloader, 3dmm eigenvectors, optimization method
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
-    model
+    model.eval()
 
     # mean shape and eigenvectors for 3dmm
     M = 100
     data3dmm = dataloader.SyntheticLoader()
     mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
     lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float()
+    shape = mu_lm
 
     # sample from f testing set
     allerror_2d = []
     allerror_3d = []
     allerror_rel3d = []
     allerror_relf = []
-    allerror_f = []
-    allerror_d = []
+    all_f = []
+    all_depth = []
 
     seterror_3d = []
     seterror_rel3d = []
@@ -171,52 +128,58 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
         error_3d = []
         error_rel3d = []
         error_relf = []
+        M = 100;
+        N = 68;
+        batch_size = 1;
 
         for k in range(len(data)):
             batch = data[k]
             x_cam_gt = batch['x_cam_gt']
             x_w_gt = batch['x_w_gt']
             f_gt = batch['f_gt']
-            x_img = batch['x_img']
+            x_img = batch['x_img'].unsqueeze(0)
             x_img_gt = batch['x_img_gt']
             T_gt = batch['T_gt']
+            sequence = batch['x_img'].reshape((M,N,2)).permute(0,2,1)
 
-            allerror_d.append(T_gt[:,2])
+            all_depth.append(np.mean(T_gt[:,2]))
+            all_f.append(f_gt.numpy()[0])
 
-            one  = torch.ones(M,1,68)
-            x_img_one = torch.cat([x_img,one],dim=1)
+            one = torch.ones(batch_size,M*N,1)
+            x_img_one = torch.cat([x_img,one],dim=2)
 
             # run the model
-            out, trans, transfeat = model(x_img_one)
-            alphas = out[:,:199].mean(0)
-            f = torch.relu(out[:,199]).mean()
-            K = torch.zeros((3,3)).float()
+            out,_,_ = model(x_img_one.permute(0,2,1))
+            betas = out[:,:199]
+            fout = torch.relu(out[:,199])
+            if torch.any(fout < 1): fout = fout+1
 
             # apply 3DMM model from predicted parameters
-            alpha_matrix = torch.diag(alphas)
+            alpha_matrix = torch.diag(betas.squeeze())
             shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
             s = shape_cov.sum(1).view(68,3)
             #shape = (mu_lm + s)
-            shape = mu_lm
-            shape[:,2] = shape[:,2]*-1
+            #shape = mu_lm
+            #shape[:,2] = shape[:,2]*-1
 
             # run epnp using predicted shape and intrinsics
-            K[0,0] = f;
-            K[1,1] = f;
+            K = torch.zeros((3,3))
+            K[0,0] = fout;
+            K[1,1] = fout;
             K[2,2] = 1;
-            K[0,2] = 320;
-            K[1,2] = 240;
-            Xc,R,T = util.EPnP(x_img,shape,K)
+            K[0,2] = 0;
+            K[1,2] = 0;
+            Xc,R,T = util.EPnP(sequence,shape,K)
 
             # get errors
-            reproj_errors2 = util.getReprojError2(x_img,shape,R,T,K)
+            reproj_errors2 = util.getReprojError2(sequence,shape,R,T,K)
             reproj_errors3 = util.getReprojError3(x_cam_gt,shape,R,T)
             rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
 
             reproj_error = reproj_errors2.mean()
             reconstruction_error = reproj_errors3.mean()
             rel_error = rel_errors.mean()
-            f_error = torch.abs(f_gt - f) / f_gt
+            f_error = torch.abs(f_gt - fout) / f_gt
 
             allerror_3d.append(reproj_error.data.numpy())
             allerror_2d.append(reconstruction_error.data.numpy())
@@ -227,9 +190,8 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
             error_rel3d.append(rel_error.cpu().data.item())
             error_relf.append(f_error.cpu().data.item())
 
-            print(f"f/sequence: {f_test}/{k}  | f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+            print(f"f/sequence: {f_test}/{k}  | f/fgt: {fout[0].item():.3f}/{f_gt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
             #end for
-            break
 
         avg_2d = np.mean(error_2d)
         avg_rel3d = np.mean(error_rel3d)
@@ -241,19 +203,20 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
         seterror_rel3d.append(avg_rel3d)
         seterror_relf.append(avg_relf)
         #end for
-        break
 
-    allerror_d = np.stack(allerror_d).flatten()
+    all_f = np.stack(all_f).flatten()
+    all_d = np.stack(all_depth).flatten()
     allerror_2d = np.stack(allerror_2d).flatten()
     allerror_3d = np.stack(allerror_3d).flatten()
     allerror_rel3d = np.stack(allerror_rel3d).flatten()
 
     matdata = {}
-    matdata['error_d'] = allerror_d
+    matdata['fvals'] = np.array(f_vals)
+    matdata['all_f'] = np.array(all_f)
+    matdata['all_d'] = np.array(all_depth)
     matdata['error_2d'] = allerror_2d
     matdata['error_3d'] = allerror_3d
     matdata['error_rel3d'] = allerror_rel3d
-    matdata['fvals'] = np.array(f_vals)
     matdata['seterror_2d'] = np.array(seterror_2d)
     matdata['seterror_3d'] = np.array(seterror_3d)
     matdata['seterror_rel3d'] = np.array(seterror_rel3d)
@@ -272,7 +235,6 @@ if __name__ == '__main__':
     model = PointNet(k=1+199, feature_transform=args.feat_trans)
 
     test(model)
-    quit()
-    testBIWI(model)
+    #testBIWI(model)
 
 

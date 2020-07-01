@@ -25,7 +25,7 @@ class Data():
         self.mu_exp = self.dataloader.mu_exp
         self.lm_eigenvec = self.dataloader.lm_eigenvec
         self.exp_eigenvec = self.dataloader.exp_eigenvec
-        self.batchsize = 5
+        self.batchsize = 16
         self.shuffle = True
         self.transform = True
         self.batchloader = DataLoader(self.dataloader,
@@ -56,22 +56,30 @@ class TestLoader(Dataset):
 
     def __getitem__(self,idx):
         fname = self.files[idx]
+        print(fname)
         data = scipy.io.loadmat(fname)
+        self.M = 100
+        self.N = 68
 
+        std = 5;
+        noise = np.random.rand(100,68,2) * std
         tmp = data['sequence'][0,0]
         x_w = tmp['x_w']
-        x_img = tmp['x_img']
         x_img_gt = tmp['x_img_true']
         x_cam = tmp['x_cam']
         R = tmp['R']
         T = tmp['T']
         f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
         d = np.mean(T[:,2])
+        #x_img = x_img_gt
+        x_img = x_img_gt + noise
+        x_img = x_img - np.array([[320,240]])
+        x_img = x_img.reshape((self.M*self.N,2))
 
         sample = {}
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
         sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
-        sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
+        sample['x_img'] = torch.from_numpy(x_img).float()
         sample['x_img_gt'] = torch.from_numpy(x_img_gt).float().permute(0,2,1)
         sample['f_gt'] = torch.Tensor(f).float()
         sample['d_gt'] = torch.Tensor([d]).float()
@@ -83,7 +91,23 @@ class BIWILoader(Dataset):
 
     def __init__(self):
         self.root_dir = "../data/kinect_head_pose_db/matdata/"
+        shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         subjects = [f"{sub:02d}" for sub in range(1,25)]
+
+        shape_data = scipy.io.loadmat(shape_dir)
+        mu_lm = shape_data['mu_lm']
+        mu_exp = shape_data['mu_exp']
+        lm_eigenvec = shape_data['lm_eigenvec']
+        exp_eigenvec = shape_data['exp_eigenvec']
+
+        self.mu_lm = mu_lm.T
+        self.mu_lm = self.mu_lm - np.mean(self.mu_lm,0)
+        self.mu_exp = mu_exp.T
+        self.mu_exp = self.mu_exp - np.mean(self.mu_exp,0)
+
+        self.lm_eigenvec = lm_eigenvec
+        self.exp_eigenvec = exp_eigenvec
+
         return
 
     def __len__(self):
@@ -95,25 +119,38 @@ class BIWILoader(Dataset):
         file = f"sub{idx:02d}.mat"
         full_path = os.path.join(self.root_dir,file)
         data = scipy.io.loadmat(full_path)
-
         tmp = data['sequence'][0,0]
-        x_w = tmp['x_w']
-        x_img = tmp['x_img']
-        x_img_gt = tmp['x_img_gt']
-        x_cam = tmp['x_cam']
+
+        # get pose
         R = tmp['R']
         T = tmp['T']
+        M = R.shape[0]
+
+        # limit views to poses with estimated 30 degree or less
+        validview = []
+        for i in range(M):
+            r = Rotation.from_matrix(R[i])
+            angles = r.as_euler('zyx',degrees=True)
+            if np.any(np.abs(angles) > 30): continue
+            else: validview.append(i)
+
+        x_w = tmp['x_w']
+        x_img_gt = tmp['x_img_gt'][validview]
+        self.M = x_img_gt.shape[0]
+        self.N = x_img_gt.shape[1]
+        x_img = tmp['x_img'][validview].reshape((self.M*self.N,2)) - np.array([[320,240]])
+        x_img[:,1] = x_img[:,1]*-1
+        x_cam = tmp['x_cam'][validview]
         f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
 
         sample = {}
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
         sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
-        sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
+        sample['x_img'] = torch.from_numpy(x_img).float()
         sample['x_img_gt'] = torch.from_numpy(x_img_gt.astype(np.float)).float().permute(0,2,1)
         sample['f_gt'] = torch.Tensor(f).float()
 
         return sample
-
 
 class SyntheticLoader(Dataset):
 
@@ -147,45 +184,48 @@ class SyntheticLoader(Dataset):
         # extra boundaries on camera coordinates
         self.w = 640
         self.h = 480
-        self.minf = 280; self.maxf = 2200
+        self.minf = 300; self.maxf = 1000
         self.minz = 380; self.maxz = 3200;
         self.max_rx = 20;
         self.max_ry = 20; self.max_rz = 20;
         self.xstd = 1; self.ystd = 1;
 
     def __len__(self):
-        return 1000
+        return 10000
 
     def __getitem__(self,idx):
-
         # data holders
         M = self.M
+        N = self.N
         x_w = np.zeros((68,3));
         x_cam = np.zeros((M,68,3));
         x_img = np.zeros((M,68,2));
         x_img_true = np.zeros((M,68,2));
 
         # define intrinsics
-        f = self.minf + random.random() * (self.maxf - self.minf);
-        K = np.array([[f,0,320],[ 0,f,240], [0,0,1]])
+        #f = self.minf + random.random() * (self.maxf - self.minf);
+        f = 500
+        K = np.array([[f,0,0],[ 0,f,0], [0,0,1]])
 
         # create random 3dmm shape
-        alpha = np.random.randn(199)
-        alphas = np.diag(alpha)
-        s = np.sum(np.matmul(self.lm_eigenvec,alphas),1)
+        alpha = np.random.randn(199)*5
+        s = np.sum( np.expand_dims(alpha,0) * self.lm_eigenvec,1)
         s = s.reshape(68,3)
         lm = self.mu_lm + s
         lm[:,2] = lm[:,2] * -1
-        x_w = lm;
+        x_w = lm
+
+        import pptk
+        v = pptk.viewer(x_w)
+        v.set(point_size=1.1)
 
         # create random 3dmm expression
-        betas = np.diag(np.random.randn(29) * 0.2)
-        e = np.sum(np.matmul(self.exp_eigenvec,betas),1)
-        e = e.reshape(68,3)
-        exp = e
+        beta = np.random.randn(29) * 0.1
+        e = np.sum(np.expand_dims(beta,0)*self.exp_eigenvec,1)
+        exp = e.reshape(68,3)
 
         # define depth
-        tz = random.random() * (self.maxz-self.minz) + self.minz
+        tz = np.random.random() * (self.maxz-self.minz) + self.minz
         minz = np.maximum(tz - 500,self.minz)
         maxz = np.minimum(tz + 500,self.maxz)
 
@@ -198,16 +238,17 @@ class SyntheticLoader(Dataset):
 
             ximg_init = self.project2d(r_init,t_init,K,x_w)
             ximg_final = self.project2d(r_final,t_final,K,x_w)
-            if np.any(np.amin(ximg_init,axis=0) < 0): continue
-            if np.any(np.amin(ximg_final,axis=0) < 0): continue
+            if np.any(np.amin(ximg_init,axis=0) < -320): continue
+            if np.any(np.amin(ximg_final,axis=0) < -320): continue
+            if np.any(np.amin(ximg_init,axis=1) < -240): continue
+            if np.any(np.amin(ximg_final,axis=1) < -240): continue
             init = np.amax(ximg_init,axis=0)
             final = np.amax(ximg_final,axis=0)
-            if init[0] > 640: continue
-            if final[0] > 640: continue
-            if init[1] > 480: continue
-            if final[1] > 480: continue
+            if init[0] > 320: continue
+            if final[0] > 320: continue
+            if init[1] > 240: continue
+            if final[1] > 240: continue
             break
-
         d = (t_init[2] + t_final[2]) / 2
 
         # interpolate quaternion using spherical linear interpolation
@@ -222,41 +263,27 @@ class SyntheticLoader(Dataset):
                 np.linspace(t_init[1],t_final[1],M),
                 np.linspace(t_init[2],t_final[2],M))).T
 
-        # create each view
-        for i in range(M):
-            # get rotation
-            r = matrices[i]
+        x_cam = np.matmul(matrices,np.stack(M*[x_w.T])) + np.expand_dims(T,-1)
+        proj = np.matmul(np.stack(M*[K]),x_cam)
+        proj = proj / np.expand_dims(proj[:,2,:],1)
+        proj = proj.transpose(0,2,1)
+        x_img_true = proj[:,:,:2]
 
-            # get translation
-            t = T[i,:];
-
-            # project onto 3d and 2d using extrinsics/intrinsics
-            xc = np.matmul(r,x_w.T) + np.expand_dims(t,1);
-            x_cam[i,:,:] = xc.T;
-            proj = np.matmul(K, xc);
-            proj = proj / proj[2,:];
-            x2d = proj.T;
-            x2d = x2d[:,:2];
-            x_img_true[i,:,:] = x2d;
-
-            # add 2d noise
-            xnoise = np.random.randn(68)*self.xstd;
-            ynoise = np.random.randn(68)*self.ystd;
-            noise = np.stack((xnoise,ynoise))
-            x_img[i,:,:] = x2d + noise.T
-
-            # in case you doubt the operations
-            #canvas = np.zeros((480,640,3))
-            #util.drawpts(canvas,x_img[i,:,:])
+        std = np.random.rand(1)*5;
+        noise = np.random.rand(100,68,2) * std
+        x_img = x_img_true + noise
+        x_img = x_img.reshape((M*N,2))
+        #x_img_norm = (x_img - np.array([[320,240]])) / 320
 
         # create dictionary for results
         sample = {}
-        sample['beta_gt'] = torch.from_numpy(alpha).float()
+        #sample['beta_gt'] = torch.from_numpy(alpha).float()
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
-        sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
-        sample['x_img'] = torch.from_numpy(x_img).float().permute(0,2,1)
+        sample['x_cam_gt'] = torch.from_numpy(x_cam).float()
+        sample['x_img'] = torch.from_numpy(x_img).float()
         sample['x_img_gt'] = torch.from_numpy(x_img_true).float().permute(0,2,1)
         sample['f_gt'] = torch.Tensor([f]).float()
+        #sample['x_img_norm'] = torch.from_numpy(x_img_norm).float()
         #sample['K_gt'] = torch.from_numpy(K).float()
         #sample['R_gt'] = torch.from_numpy(R).float()
         #sample['Q_gt'] = torch.from_numpy(Q).float()
@@ -268,21 +295,19 @@ class SyntheticLoader(Dataset):
         ax = self.max_rx;
         ay = self.max_ry;
         az = self.max_rz;
-        rx = random.random()*2*ax - ax;
-        ry = random.random()*2*ay - ay;
-        rz = random.random()*2*az - az;
+        rx = np.random.random()*2*ax - ax;
+        ry = np.random.random()*2*ay - ay;
+        rz = np.random.random()*2*az - az;
 
         r = Rotation.from_euler('zyx',[rz,ry,rx],degrees=True)
         q = r.as_quat()
 
         return r,q
 
-    def generateRandomTranslation(self,K,minz,maxz):
+    def generateRandomTranslation(self,K,minz,maxz,w=640,h=480):
 
-        w = K[0,2]*2;
-        h = K[1,2]*2;
-        xvec = np.array([[w-100],[w/2],[1]])
-        yvec = np.array([[h/2],[h-100],[1]])
+        xvec = np.array([[w],[w/2],[1]])
+        yvec = np.array([[h/2],[h],[1]])
         vz = np.array([[0],[0],[1]]);
         vx = np.matmul(np.linalg.inv(K),xvec)
         vy = np.matmul(np.linalg.inv(K),yvec)
@@ -292,11 +317,11 @@ class SyntheticLoader(Dataset):
         thetax = np.arctan2(np.linalg.norm(np.cross(vz,vy)),np.dot(vz,vy));
         thetay = np.arctan2(np.linalg.norm(np.cross(vz,vx)),np.dot(vz,vx));
 
-        tz = random.random()*(maxz-minz) + minz;
+        tz = np.random.random()*(maxz-minz) + minz;
         maxx = tz * np.tan(thetax);
         maxy = tz * np.tan(thetay);
-        tx = random.random()*maxx*2 - maxx;
-        ty = random.random()*maxy*2 - maxy;
+        tx = np.random.random()*maxx*2 - maxx;
+        ty = np.random.random()*maxy*2 - maxy;
         t = [tx,ty,tz];
 
         return np.array(t)
@@ -379,18 +404,38 @@ class ToTensor(object):
 
 # UNIT TESTING
 if __name__ == '__main__':
-    '''
     loader = BIWILoader()
     sample = loader[1]
+    print(sample['x_w_gt'].shape)
+    print(sample['x_img'].shape)
+    print(sample['x_img_gt'].shape)
+    print(sample['f_gt'].shape)
+    print(sample['x_cam_gt'].shape)
     print("sample made")
     print(sample.keys())
-    '''
 
+    #util.scatter(sample['x_img'].numpy())
+    import matplotlib.pyplot as plt
+    x = sample['x_img'].numpy()
+    plt.scatter(x[:68,0],x[:68,1])
+    plt.show()
+
+    np.random.seed(0)
     loader = SyntheticLoader()
-
     sample = loader[1]
+    ximg = sample['x_img']
+    print(sample['x_w_gt'].shape)
+    print(sample['x_img'].shape)
+    print(sample['x_img_gt'].shape)
+    print(sample['f_gt'].shape)
+    print(sample['x_cam_gt'].shape)
     print("sample made")
     print(sample.keys())
+    x = sample['x_img'].numpy()
+    plt.scatter(x[:68,0],x[:68,1])
+    plt.show()
+    quit()
+
 
     quit()
     loader = TestLoader(1000)
