@@ -680,21 +680,23 @@ def gauss_newton(km,cw,betas):
     L = compute_L6_10(km)
     rho = compute_rho(cw)
 
-    n_iterations = 10
+    n_iterations = 15
     current_betas = betas
 
     # repeat below code for more iterations of gauss newton, but 4-5 should be enough
-    betas1, _ = gauss_newton_step(betas,rho,L)
-    betas2, _ = gauss_newton_step(betas1,rho,L)
-    betas3, _ = gauss_newton_step(betas2,rho,L)
-    betas4, _ = gauss_newton_step(betas3,rho,L)
-    betas5, _ = gauss_newton_step(betas4,rho,L)
-    betas6, _ = gauss_newton_step(betas5,rho,L)
-    betas7, _ = gauss_newton_step(betas6,rho,L)
-    betas8, _ = gauss_newton_step(betas7,rho,L)
-    betas9, err = gauss_newton_step(betas8,rho,L)
+    for i in range(n_iterations):
+        betas,err = gauss_newton_step(betas,rho,L)
+    #betas1, _ = gauss_newton_step(betas,rho,L)
+    #betas2, _ = gauss_newton_step(betas1,rho,L)
+    #betas3, _ = gauss_newton_step(betas2,rho,L)
+    #betas4, _ = gauss_newton_step(betas3,rho,L)
+    #betas5, _ = gauss_newton_step(betas4,rho,L)
+    #betas6, _ = gauss_newton_step(betas5,rho,L)
+    #betas7, _ = gauss_newton_step(betas6,rho,L)
+    #betas8, _ = gauss_newton_step(betas7,rho,L)
+    #betas9, err = gauss_newton_step(betas8,rho,L)
 
-    return betas9, err
+    return betas, err
 
 def gauss_newton_step(betas,rho,L):
     M = betas.shape[0]

@@ -126,8 +126,9 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
     # set random seed for reproducibility of test set
     np.random.seed(0)
+    torch.manual_seed(0)
     for f_test in f_vals:
-        f_test = 1400
+        f_test = 400
         # create dataloader
         loader = dataloader.TestLoader(f_test)
 
@@ -146,8 +147,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
             model = Model1(k=1, feature_transform=False)
             model.apply(util.init_weights)
             opt1 = torch.optim.Adam(model2.parameters(),lr=1e-1)
-            opt2 = torch.optim.Adam(model.parameters(),lr=1)
-            optimizer = torch.optim.Adam(list(model.parameters()) + list(model2.parameters()),lr=1)
+            opt2 = torch.optim.Adam(model.parameters(),lr=1e-1)
 
             # load the data
             x_cam_gt = data['x_cam_gt']
@@ -172,9 +172,9 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
             for outerloop in itertools.count():
 
                 # calibration alg3
+                shape = shape.detach()
                 for iter2 in itertools.count():
                     opt2.zero_grad()
-                    shape = shape.detach()
 
                     # focal length prediction
                     curf,_,_ = model(x.unsqueeze(0))
@@ -190,18 +190,20 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
                     # differentiable PnP pose estimation
                     km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
                     Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                     loss = error2d.mean()
+                    if iter2 > 20 and prev_loss < loss:
+                        break
+                    else:
+                        prev_loss = loss
                     loss.backward()
                     opt2.step()
                     print(f"iter: {iter2} | error: {loss.item():.3f} | f/fgt: {curf.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
 
-                    if iter2 == 20: break
-
                 # sfm alg2
+                curf = curf.detach()
                 for iter1 in itertools.count():
                     opt1.zero_grad()
-                    curf = curf.detach()
 
                     # shape prediction
                     betas,_,_ = model2(x.unsqueeze(0))
@@ -218,16 +220,18 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
                     # differentiable PnP pose estimation
                     km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
                     Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                     loss = error2d.mean()
+                    if iter1 > 20 and prev_loss < loss:
+                        break
+                    else:
+                        prev_loss = loss
                     loss.backward()
                     opt1.step()
                     print(f"iter: {iter1} | error: {loss.item():.3f} | f/fgt: {curf.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
 
-                    if iter1 == 20: break
-
                 # closing condition for outerloop on dual objective
-                if outerloop == 5: break
+                if outerloop == 4: break
 
             f = curf
             # get errors

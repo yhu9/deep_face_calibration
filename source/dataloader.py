@@ -2,17 +2,16 @@
 import os
 import random
 
-import torch
 from skimage import io, transform
 import scipy.io
 from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Slerp
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 #import pptk
 
 import util
+import torch
 # the main data class which has iterators to all datasets
 # add more datasets accordingly
 
@@ -61,7 +60,7 @@ class TestLoader(Dataset):
         self.M = 100
         self.N = 68
 
-        std = 5;
+        std = 2;
         noise = np.random.rand(100,68,2) * std
         tmp = data['sequence'][0,0]
         x_w = tmp['x_w']

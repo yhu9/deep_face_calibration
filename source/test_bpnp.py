@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import torchvision
 
-from logger import Logger
+#from logger import Logger
 from model import Model1
 import dataloader
 import util
