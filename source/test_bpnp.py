@@ -111,6 +111,9 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     data3dmm = dataloader.SyntheticLoader()
     mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
     mu_lm[:,2] = mu_lm[:,2]*-1
+    le = torch.mean(mu_lm[36:42,:],axis=0)
+    re = torch.mean(mu_lm[42:48,:],axis=0)
+    ipd = torch.norm(le - re)
     lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float()
     #optimizer = torch.optim.Adam(model.parameters(),lr=1e-2)
 
@@ -120,18 +123,19 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     allerror_rel3d = []
     allerror_relf = []
     all_f = []
+    all_fpred = []
     all_depth = []
 
     seterror_3d = []
     seterror_rel3d = []
     seterror_relf = []
     seterror_2d = []
-    f_vals = [400 + i*100 for i in range(4)]
+    f_vals = [i*100 for i in range(4,15)]
 
     # set random seed for reproducibility of test set
     np.random.seed(0)
+    torch.manual_seed(0)
     for f_test in f_vals:
-        f_test = 400
         # create dataloader
         loader = dataloader.TestLoader(f_test)
 
@@ -144,7 +148,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
         batch_size = 1;
 
         for j, data in enumerate(loader):
-
+            if j == 10: break
             # create bpnp camera calibration model
             model1 = (1.1*torch.randn(1)).requires_grad_()
             opt1 = torch.optim.Adam({model1},lr=1e-1)
@@ -178,7 +182,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
             for outerloop in itertools.count():
                 # camera calibration
                 shape = shape.detach()
-                for iter1 in itertools.count():
+                for iter in itertools.count():
                     opt1.zero_grad()
 
                     # focal length prediction
@@ -198,21 +202,28 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # loss
                     loss = ((pred - x2d)**2).mean()
+                    if iter > 10 and prev_loss < loss:
+                        break
+                    else:
+                        prev_loss = loss
                     loss.backward()
                     opt1.step()
-                    print(f"iter: {iter1} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
-                    if iter1 == 20: break
+                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
                     ini_pose = pose.detach()
 
                 # structure from motion
                 f = f.detach()
                 #import pptk
                 #v = pptk.viewer([0,0,0])
-                for iter2 in itertools.count():
+                for iter in itertools.count():
                     opt2.zero_grad()
 
                     # get 3d shape from model
                     shape = model2(torch.ones(1,3,32,32)).view(N,3)
+                    le = torch.mean(shape[36:42,:],axis=0)
+                    re = torch.mean(shape[42:48,:],axis=0)
+                    pred_ipd = torch.norm(le - re)
+                    shape = (ipd/pred_ipd) * shape
 
                     #v.load(shape.detach().cpu().numpy())
                     #v.set(point_size=1)
@@ -222,8 +233,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # focal length prediction
                     K = torch.zeros((3,3)).float()
-                    K[0,0] = f
-                    K[1,1] = f
+                    K[0,0] = 400
+                    K[1,1] = 400
                     K[2,2] = 1
 
                     # differentiable pose estimation
@@ -232,13 +243,18 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # loss
                     loss = ((pred - x2d)**2).mean()
+                    if iter > 10 and prev_loss < loss:
+                        break
+                    else:
+                        prev_loss = loss
                     loss.backward()
                     opt2.step()
-                    print(f"iter: {iter2} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
-                    if iter2 == 20: break
+                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
 
                 # closing condition for outerloop on dual objective
-                if outerloop == 5: break
+                if outerloop == 2: break
+
+            all_fpred.append(f.numpy()[0])
 
             # get errors
             km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
@@ -276,9 +292,9 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
         seterror_rel3d.append(avg_rel3d)
         seterror_relf.append(avg_relf)
         #end for
-        break
 
     all_f = np.stack(all_f).flatten()
+    all_fpred = np.stack(all_fpred).flatten()
     all_d = np.stack(all_depth).flatten()
     allerror_2d = np.stack(allerror_2d).flatten()
     allerror_3d = np.stack(allerror_3d).flatten()
@@ -288,6 +304,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     matdata['shape'] = shape.detach().cpu().numpy()
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
+    matdata['all_fpred'] = np.array(all_fpred)
     matdata['all_d'] = np.array(all_depth)
     matdata['error_2d'] = allerror_2d
     matdata['error_3d'] = allerror_3d

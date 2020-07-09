@@ -1089,6 +1089,8 @@ def scatter(pts,color=[255,0,0]):
 # epnp algorithm to solve for camera pose with gauss newton
 #INPUT:
 # x_img         (M,2,N)
+# x_w           (N,3)
+# K             (3,3)
 def EPnP(x_img,x_w,K):
     M = x_img.shape[0]
     N = x_img.shape[2]

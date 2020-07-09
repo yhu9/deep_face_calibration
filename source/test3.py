@@ -1,6 +1,7 @@
 
 import itertools
 import argparse
+import os
 
 import scipy.io
 import torch
@@ -14,14 +15,14 @@ import util
 ####################################################
 
 parser = argparse.ArgumentParser(description="training arguments")
-parser.add_argument("--model", default="model/model_ximgnoisy.pt")
+parser.add_argument("--model", default="net.pt")
 parser.add_argument("--out",default="results/exp.mat")
-parser.add_argument("--feat_trans", default=False, action='store_true')
+parser.add_argument("--opt", default=False, action='store_true')
 args = parser.parse_args()
 
-####################################################
+#########################################################
 
-def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
+def testBIWI(model,modelin=args.model,outfile=args.out):
     if modelin != "":
         model.load_state_dict(torch.load(modelin))
     model.eval()
@@ -93,19 +94,25 @@ def testBIWI(model,modelin=args.model,outfile=args.out,feature_transform=args.fe
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
 
-def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
+def test(modelin=args.model,outfile=args.out,optimize=args.opt):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
+    calib_net = CalibrationNet3(n=1)
+    sfm_net = CalibrationNet3(n=199)
     if modelin != "":
-        model.load_state_dict(torch.load(modelin))
-    model.eval()
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        calib_net.load_state_dict(torch.load(calib_path))
+        sfm_net.load_state_dict(torch.load(sfm_path))
+    #calib_net.eval()
+    #sfm_net.eval()
 
     # mean shape and eigenvectors for 3dmm
     M = 100
     data3dmm = dataloader.SyntheticLoader()
-    mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
-    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float()
-    shape = mu_lm
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
+    mu_lm[:,2] = mu_lm[:,2]*-1
+    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
 
     # sample from f testing set
     allerror_2d = []
@@ -113,16 +120,18 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
     allerror_rel3d = []
     allerror_relf = []
     all_f = []
+    all_fpred = []
     all_depth = []
 
     seterror_3d = []
     seterror_rel3d = []
     seterror_relf = []
     seterror_2d = []
-    f_vals = [i*100 for i in range(4,21)]
+    f_vals = [i*100 for i in range(4,15)]
     for f_test in f_vals:
         # create dataloader
-        data = dataloader.TestLoader(f_test)
+        #f_test = 400
+        loader = dataloader.TestLoader(f_test)
 
         error_2d = []
         error_3d = []
@@ -132,54 +141,112 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
         N = 68;
         batch_size = 1;
 
-        for k in range(len(data)):
-            batch = data[k]
-            x_cam_gt = batch['x_cam_gt']
-            x_w_gt = batch['x_w_gt']
-            f_gt = batch['f_gt']
-            x_img = batch['x_img'].unsqueeze(0)
-            x_img_gt = batch['x_img_gt']
-            T_gt = batch['T_gt']
-            sequence = batch['x_img'].reshape((M,N,2)).permute(0,2,1)
-
+        for j,data in enumerate(loader):
+            if j == 10: break
+            # load the data
+            x_cam_gt = data['x_cam_gt']
+            shape_gt = data['x_w_gt']
+            fgt = data['f_gt']
+            x_img = data['x_img']
+            x_img_gt = data['x_img_gt']
+            T_gt = data['T_gt']
             all_depth.append(np.mean(T_gt[:,2]))
-            all_f.append(f_gt.numpy()[0])
+            all_f.append(fgt.numpy()[0])
 
-            x = x_img.reshape((batch_size,M,N,2)).permute(0,3,2,1) / 640
-            #x_img_one = torch.cat([x_img,one],dim=2)
+            ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
+            x = ptsI.unsqueeze(0).permute(0,2,1,3)
 
             # run the model
-            out = model(x)
-            betas = out[:,:199]
-            fout = torch.relu(out[:,199])
-            if torch.any(fout < 1): fout = fout+1
+            f = calib_net(x) + 300
+            betas = sfm_net(x)
+            betas = betas.squeeze(0).unsqueeze(-1)
+            shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
 
-            # apply 3DMM model from predicted parameters
-            alpha_matrix = torch.diag(betas.squeeze())
-            shape_cov = torch.mm(lm_eigenvec,alpha_matrix)
-            s = shape_cov.sum(1).view(68,3)
-            #shape = (mu_lm + s)
-            #shape = mu_lm
-            #shape[:,2] = shape[:,2]*-1
+            # additional optimization on initial solution
+            if optimize:
+                calib_net.load_state_dict(torch.load(calib_path))
+                sfm_net.load_state_dict(torch.load(sfm_path))
+                opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
+                opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-1)
+                for outerloop in itertools.count():
 
-            # run epnp using predicted shape and intrinsics
-            K = torch.zeros((3,3))
-            K[0,0] = fout;
-            K[1,1] = fout;
-            K[2,2] = 1;
-            K[0,2] = 0;
-            K[1,2] = 0;
-            Xc,R,T = util.EPnP(sequence,shape,K)
+                    # camera calibration
+                    shape = shape.detach()
+                    for iter in itertools.count():
+                        opt1.zero_grad()
+                        f = calib_net(x) + 300
+                        K = torch.zeros(3,3).float()
+                        K[0,0] = f
+                        K[1,1] = f
+                        K[2,2] = 1
 
+                        f_error = torch.mean(torch.abs(f - fgt))
+                        rmse = torch.norm(shape_gt - shape,dim=1).mean()
+
+                        # differentiable PnP pose estimation
+                        km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+                        error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                        loss = error2d.mean()
+                        if iter == 20: break
+                        if iter > 10 and prev_loss < loss:
+                            break
+                        else:
+                            prev_loss = loss
+                        loss.backward()
+                        opt1.step()
+                        print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
+
+                    # sfm
+                    f = f.detach()
+                    for iter in itertools.count():
+                        opt2.zero_grad()
+
+                        # shape prediction
+                        betas = sfm_net(x)
+                        shape = torch.sum(betas * lm_eigenvec,1)
+                        shape = shape.reshape(68,3) + mu_lm
+                        K = torch.zeros((3,3)).float()
+                        K[0,0] = f
+                        K[1,1] = f
+                        K[2,2] = 1
+
+                        rmse = torch.norm(shape_gt - shape,dim=1).mean().detach()
+
+                        # differentiable PnP pose estimation
+                        km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+                        error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                        loss = error2d.mean()
+                        if iter == 20: break
+                        if iter > 10 and prev_loss < loss:
+                            break
+                        else:
+                            prev_loss = loss
+                        loss.backward()
+                        opt2.step()
+                        print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
+
+                    # closing condition for outerloop on dual objective
+                    if outerloop == 2: break
+            else:
+                K = torch.zeros(3,3).float()
+                K[0,0] = f
+                K[1,1] = f
+                K[2,2] = 1
+                km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+                Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+
+            all_fpred.append(f.detach().numpy()[0])
             # get errors
-            reproj_errors2 = util.getReprojError2(sequence,shape,R,T,K)
+            reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
             reproj_errors3 = util.getReprojError3(x_cam_gt,shape,R,T)
-            rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
+            rel_errors =  util.getRelReprojError3(x_cam_gt,shape,R,T)
 
             reproj_error = reproj_errors2.mean()
             reconstruction_error = reproj_errors3.mean()
             rel_error = rel_errors.mean()
-            f_error = torch.abs(f_gt - fout) / f_gt
+            f_error = torch.abs(fgt - f) / fgt
 
             allerror_3d.append(reproj_error.data.numpy())
             allerror_2d.append(reconstruction_error.data.numpy())
@@ -190,8 +257,7 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
             error_rel3d.append(rel_error.cpu().data.item())
             error_relf.append(f_error.cpu().data.item())
 
-            print(f"f/sequence: {f_test}/{k}  | f/fgt: {fout[0].item():.3f}/{f_gt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-            #end for
+            print(f"f/sequence: {f_test}/{j}  | f/fgt: {f[0].item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
 
         avg_2d = np.mean(error_2d)
         avg_rel3d = np.mean(error_rel3d)
@@ -202,9 +268,9 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
         seterror_3d.append(avg_3d)
         seterror_rel3d.append(avg_rel3d)
         seterror_relf.append(avg_relf)
-        #end for
 
     all_f = np.stack(all_f).flatten()
+    all_fpred = np.stack(all_fpred).flatten()
     all_d = np.stack(all_depth).flatten()
     allerror_2d = np.stack(allerror_2d).flatten()
     allerror_3d = np.stack(allerror_3d).flatten()
@@ -213,6 +279,7 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
     matdata = {}
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
+    matdata['all_fpred'] = np.array(all_fpred)
     matdata['all_d'] = np.array(all_depth)
     matdata['error_2d'] = allerror_2d
     matdata['error_3d'] = allerror_3d
@@ -232,8 +299,7 @@ def test(model, modelin=args.model,outfile=args.out,feature_transform=args.feat_
 ####################################################################################3
 if __name__ == '__main__':
 
-    model = CalibrationNet3()
-    test(model)
+    test()
     #testBIWI(model)
 
 

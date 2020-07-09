@@ -6,9 +6,9 @@ import os
 import torch
 import torch.optim
 
+from logger import Logger
 from model import Model1
 from model import CalibrationNet3
-from model import AdjustmentNet
 import dataloader
 import util
 
@@ -17,25 +17,32 @@ import util
 parser = argparse.ArgumentParser(description="training arguments")
 parser.add_argument("--out", default="model.pt")
 parser.add_argument("--model", default="")
+parser.add_argument("--log",type=int,default=1)
+parser.add_argument("--logname",default="log")
 parser.add_argument("--device",default='cpu')
-parser.add_argument("--opt",default=False, action="store_true")
 args = parser.parse_args()
 
 ####################################################
 
-def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt):
+def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.logname,device=args.device):
+    # define logger
+    if log:
+        logger = Logger(logname)
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
     calib_net = CalibrationNet3(n=1)
-    sfm_net = CalibrationNet3(n=199)
-    adj_net = AdjustmentNet()
-
-    calib_net.to(device=device)
-    sfm_net.to(device=device)
-    adj_net.to(device=device)
-    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-3)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-3)
-    opt3 = torch.optim.Adam(adj_net.parameters(),lr=1e-3)
+    sfm_net = Model1(k=199, feature_transform=False)
+    if modelin != "":
+        #model_dict = model.state_dict()
+        #pretrained_dict = torch.load(modelin)
+        #pretrained_dict = {k: v for k,v in pretrained_dict.items() if k in model_dict}
+        #model_dict.update(pretrained_dict)
+        #model.load_state_dict(pretrained_dict)
+        model.load_state_dict(torch.load(modelin))
+    #calib_net.to(device=device)
+    #sfm_net.to(device=device)
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-1)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-1)
 
     # dataloader
     data = dataloader.Data()
@@ -64,7 +71,7 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
             x_img = batch['x_img'].to(device=device)
             #beta_gt = batch['beta_gt'].to(device=device)
             #x_img_norm = batch['x_img_norm']
-            x_img_gt = batch['x_img_gt'].to(device=device).permute(0,2,1,3)
+            #x_img_gt = batch['x_img_gt'].to(device=device)
             batch_size = fgt.shape[0]
 
             one = torch.ones(batch_size,M*N,1).to(device=device)
@@ -74,38 +81,21 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
 
             ptsI = x_img_one.reshape(batch_size,M,N,3).permute(0,1,3,2)[:,:,:2,:]
 
-            # if just optimizing
-            if not opt:
-                # point adjustment
-                delta = adj_net(x)
-                pred = delta + x
+            f = calib_net(x)
+            f = f + 300
+            K = torch.zeros((batch_size,3,3)).float().to(device=device)
+            K[:,0,0] = f.squeeze()
+            K[:,1,1] = f.squeeze()
+            K[:,2,2] = 1
 
-                # calibration
-                f = calib_net(pred) + 300
-                K = torch.zeros((batch_size,3,3)).float().to(device=device)
-                K[:,0,0] = f.squeeze()
-                K[:,1,1] = f.squeeze()
-                K[:,2,2] = 1
+            # ground truth l1 error
+            opt1.zero_grad()
+            f_error = torch.mean(torch.abs(f - fgt))
+            f_error.backward()
+            opt1.step()
 
-                # sfm
-                betas = sfm_net(pred)
-                betas = betas.unsqueeze(-1)
-                shape = mu_lm + torch.bmm(lm_eigenvec,betas).squeeze().view(batch_size,N,3)
-
-                opt1.zero_grad()
-                opt2.zero_grad()
-                opt3.zero_grad()
-                f_error = torch.mean(torch.abs(f - fgt))
-                error2d = torch.mean(torch.abs(pred - x_img_gt))
-                error3d = torch.mean(torch.abs(shape - shape_gt))
-                error = f_error + error2d + error3d
-                error.backward()
-                opt1.step()
-                opt2.step()
-                opt3.step()
-
-                print(f"f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} | error2d: {error2d.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
-                continue
+            print(f"f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
+            continue
 
             # dual optimization
             for outerloop in itertools.count():
@@ -113,7 +103,7 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                 shape = shape.detach()
                 for iter in itertools.count():
                     opt1.zero_grad()
-                    f = calib_net(x)
+                    f,_,_ = calib_net(x)
                     f = f + 300
                     K = torch.zeros((batch_size,3,3)).float().to(device=device)
                     K[:,0,0] = f.squeeze()
@@ -136,9 +126,8 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                     loss1 = f_error
 
                     # stopping condition
-                    if iter == 20: break
-                    #if iter > 10 and prev_loss < loss1: break
-                    #else: prev_loss = loss1
+                    if iter > 10 and prev_loss < loss1: break
+                    else: prev_loss = loss1
 
                     # optimize network
                     loss1.backward()
@@ -150,7 +139,7 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                 for iter in itertools.count():
                     opt2.zero_grad()
 
-                    betas = sfm_net(x)
+                    betas,_,_ = sfm_net(x)
                     betas = betas.unsqueeze(-1)
                     shape = mu_lm + torch.bmm(lm_eigenvec,betas).squeeze().view(batch_size,N,3)
 
@@ -174,9 +163,8 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                     loss2 = torch.stack(error2).mean() + error3d
 
                     # stopping condition
-                    if iter == 20: break
-                    #if iter > 10 and prev_loss < loss2: break
-                    #else: prev_loss = loss2
+                    if iter > 10 and prev_loss < loss2: break
+                    else: prev_loss = loss2
 
                     # optimize network
                     loss2.backward()
@@ -184,12 +172,11 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                     print(f"iter: {iter} | error: {loss2.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f}")
 
                 # outerloop stopping condition
-                #if outerloop == 1: break
-                if outerloop == 2: break
+                if outerloop == 1: break
 
             # get errors
-            #rmse = torch.mean(torch.abs(shape - shape_gt))
-            #f_error = torch.mean(torch.abs(fgt - f) / fgt)
+            rmse = torch.mean(torch.abs(shape - shape_gt))
+            f_error = torch.mean(torch.abs(fgt - f) / fgt)
 
             # get shape error from image projection
             print(f"f/fgt: {f[0].item():.3f}/{fgt[0].item():.3f} | rmse: {rmse:.3f} | f_rel: {f_error.item():.4f}  | loss1: {loss1.item():.3f} | loss2: {loss2.item():.3f}")
@@ -198,7 +185,6 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
         print("saving!")
         torch.save(sfm_net.state_dict(), os.path.join('model','sfm_'+modelout))
         torch.save(calib_net.state_dict(), os.path.join('model','calib_'+modelout))
-        torch.save(adj_net.state_dict(),os.path.join('model','adj_'+modelout))
         #decay.step()
 
 

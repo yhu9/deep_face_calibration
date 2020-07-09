@@ -223,7 +223,7 @@ class CalibrationNet(nn.Module):
 
 class CalibrationNet2(nn.Module):
 
-    def __init__(self):
+    def __init__(self,k=200):
         super(CalibrationNet2,self).__init__()
 
         #hidden_size=512
@@ -234,7 +234,7 @@ class CalibrationNet2(nn.Module):
 
         # get final output using pointnet as encoder
         self.fc1 = nn.Linear(512,256)
-        self.fc2 = nn.Linear(256,200)
+        self.fc2 = nn.Linear(256,k)
 
         self.sigmoid = nn.sigmoid()
 
@@ -251,12 +251,8 @@ class CalibrationNet2(nn.Module):
 
 class CalibrationNet3(nn.Module):
 
-    def __init__(self):
+    def __init__(self, n=200):
         super(CalibrationNet3,self).__init__()
-
-        #hidden_size=512
-        #num_layers=2
-        N = 68
 
         #self.hconv = torch.nn.Conv2d(2,128,(1,7),1,(0,3))
         #self.vconv = torch.nn.Conv2d(2,128,(68,1),1,0)
@@ -264,11 +260,10 @@ class CalibrationNet3(nn.Module):
         self.conv1 = torch.nn.Conv2d(2,256,3,1,1)
         self.conv2 = torch.nn.Conv2d(256,256,3,1,1)
         self.conv3 = torch.nn.Conv2d(256,256,3,1,1)
-        self.bn2 = torch.nn.BatchNorm2d(256)
-        self.bn3 = torch.nn.BatchNorm2d(256)
+        #self.bn2 = torch.nn.BatchNorm2d(256)
+        #self.bn3 = torch.nn.BatchNorm2d(256)
         self.avgpool = torch.nn.AdaptiveAvgPool2d((1,1))
-        self.fc = torch.nn.Linear(256,200)
-        self.sigmoid = nn.sigmoid()
+        self.fc = torch.nn.Linear(256,n)
 
         # point net for feature extraction on each view
         # self.pointnet = PointNet(k=200, feature_transform=False)
@@ -277,18 +272,47 @@ class CalibrationNet3(nn.Module):
         #timefeat = self.hconv(x)
         #pntfeat = self.vconv(x)
         #x = self.sigmoid(self.bn1(self.conv1(x)))
-        x = self.sigmoid(self.conv1(x))
-        x = self.sigmoid(self.bn2(self.conv2(x)))
-        x = self.sigmoid(self.bn3(self.conv3(x)))
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        #x = self.pool1(torch.relu(self.conv1(x)))
+        #x = self.pool2(torch.relu(self.conv2(x)))
+        #x = self.pool3(torch.relu(self.conv3(x)))
         x = self.avgpool(x)
         x = torch.flatten(x,1)
         out = self.fc(x)
 
         return out
 
-class CalibrationNet4(nn.Module):
+class AdjustmentNet(nn.Module):
 
     def __init__(self):
+        super(AdjustmentNet,self).__init__()
+
+        self.inconv = torch.nn.Conv2d(2,256,3,1,1)
+        self.outconv = torch.nn.Conv2d(256,2,3,1,1)
+
+        self.conv1 = torch.nn.Conv2d(256,128,3,1,1)
+        self.conv2 = torch.nn.Conv2d(128,64,3,1,1)
+        self.conv3 = torch.nn.Conv2d(64,128,3,1,1)
+        self.conv4 = torch.nn.Conv2d(128,256,3,1,1)
+        self.down = torch.nn.MaxPool2d(2)
+        self.up3 = torch.nn.ConvTranspose2d(64,64,2,2)
+        self.up4 = torch.nn.ConvTranspose2d(128,128,2,2)
+
+    def forward(self,x):
+        x = torch.relu(self.inconv(x))
+        x = torch.relu(self.conv1(self.down(x)))
+        x = torch.relu(self.conv2(self.down(x)))
+        x = torch.relu(self.conv3(self.up3(x)))
+        x = torch.relu(self.conv4(self.up4(x)))
+        x = self.outconv(x)
+
+        return x
+
+class CalibrationNet4(nn.Module):
+
+    def __init__(self,n=200):
         super(CalibrationNet4,self).__init__()
 
         #hidden_size=512
@@ -303,23 +327,20 @@ class CalibrationNet4(nn.Module):
         self.conv3 = torch.nn.Conv2d(256,256,3,1,1)
         self.conv4 = torch.nn.Conv2d(256,256,3,1,1)
         self.conv5 = torch.nn.Conv2d(256,256,3,1,1)
-        self.bn2 = torch.nn.BatchNorm2d(256)
-        self.bn3 = torch.nn.BatchNorm2d(256)
-        self.bn4 = torch.nn.BatchNorm2d(256)
-        self.bn5 = torch.nn.BatchNorm2d(256)
+        self.pool1 = torch.nn.MaxPool2d(3,stride=2)
+        self.pool1 = torch.nn.MaxPool2d(3,stride=2)
         self.avgpool = torch.nn.AdaptiveAvgPool2d((1,1))
-        self.fc = torch.nn.Linear(256,200)
-        self.sigmoid = nn.sigmoid()
+        self.fc = torch.nn.Linear(256,n)
 
         # point net for feature extraction on each view
         # self.pointnet = PointNet(k=200, feature_transform=False)
 
     def forward(self,x):
-        x = self.sigmoid(self.conv1(x))
-        x = self.sigmoid(self.bn2(self.conv2(x)))
-        x = self.sigmoid(self.bn3(self.conv3(x)))
-        x = self.sigmoid(self.bn4(self.conv4(x)))
-        x = self.sigmoid(self.bn5(self.conv5(x)))
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = torch.relu(self.conv4(x))
+        x = torch.relu(self.conv5(x))
         x = self.avgpool(x)
         x = torch.flatten(x,1)
         out = self.fc(x)

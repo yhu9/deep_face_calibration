@@ -24,7 +24,7 @@ class Data():
         self.mu_exp = self.dataloader.mu_exp
         self.lm_eigenvec = self.dataloader.lm_eigenvec
         self.exp_eigenvec = self.dataloader.exp_eigenvec
-        self.batchsize = 16
+        self.batchsize = 4
         self.shuffle = True
         self.transform = True
         self.batchloader = DataLoader(self.dataloader,
@@ -70,9 +70,8 @@ class TestLoader(Dataset):
         T = tmp['T']
         f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
         d = np.mean(T[:,2])
-        #x_img = x_img_gt
+        x_img_gt = x_img_gt - np.array([[320,240]])
         x_img = x_img_gt + noise
-        x_img = x_img - np.array([[320,240]])
         x_img = x_img.reshape((self.M*self.N,2))
 
         sample = {}
@@ -183,14 +182,14 @@ class SyntheticLoader(Dataset):
         # extra boundaries on camera coordinates
         self.w = 640
         self.h = 480
-        self.minf = 300; self.maxf = 1000
+        self.minf = 400; self.maxf = 1500
         self.minz = 380; self.maxz = 3200;
         self.max_rx = 20;
         self.max_ry = 20; self.max_rz = 20;
         self.xstd = 1; self.ystd = 1;
 
     def __len__(self):
-        return 10000
+        return 1000
 
     def __getitem__(self,idx):
         # data holders
@@ -202,8 +201,7 @@ class SyntheticLoader(Dataset):
         x_img_true = np.zeros((M,68,2));
 
         # define intrinsics
-        #f = self.minf + random.random() * (self.maxf - self.minf);
-        f = 500
+        f = self.minf + random.random() * (self.maxf - self.minf);
         K = np.array([[f,0,0],[ 0,f,0], [0,0,1]])
 
         # create random 3dmm shape
@@ -211,12 +209,12 @@ class SyntheticLoader(Dataset):
         s = np.sum( np.expand_dims(alpha,0) * self.lm_eigenvec,1)
         s = s.reshape(68,3)
         lm = self.mu_lm + s
-        lm[:,2] = lm[:,2] * -1
+        #lm[:,2] = lm[:,2] * -1
         x_w = lm
 
-        import pptk
-        v = pptk.viewer(x_w)
-        v.set(point_size=1.1)
+        #import pptk
+        #v = pptk.viewer(x_w)
+        #v.set(point_size=1.1)
 
         # create random 3dmm expression
         beta = np.random.randn(29) * 0.1

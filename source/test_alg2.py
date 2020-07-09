@@ -105,7 +105,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     M = 100
     N = 68
     data3dmm = dataloader.SyntheticLoader()
-    mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
     mu_lm[:,2] = mu_lm[:,2]*-1
     lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float()
     #optimizer = torch.optim.Adam(model.parameters(),lr=1e-2)
@@ -128,7 +128,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     np.random.seed(0)
     torch.manual_seed(0)
     for f_test in f_vals:
-        f_test = 400
+        f_test = 1400
         # create dataloader
         loader = dataloader.TestLoader(f_test)
 
