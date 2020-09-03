@@ -42,11 +42,11 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
 
     Mvals = [i * 100 for i in range(1,10)]
     Nvals = [i * 100 for i in range(1,10)]
-    f_vals = [i*100 for i in range(4,14)]
+    f_vals = [i*200 for i in range(2,7)]
 
-    fpred = np.zeros((10,10,10,10))
-    factual = np.zeros((10,10,10,10))
-    depth_error = np.zeros((10,10,10,10))
+    fpred = np.zeros((10,10,5,5))
+    factual = np.zeros((10,10,5,5))
+    depth_error = np.zeros((10,10,5,5))
 
     for i,viewcount in enumerate(Mvals):
         for j,ptcount in enumerate(Nvals):
@@ -61,7 +61,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
                 sigma = torch.diag(sigma.squeeze())
                 lm_eigenvec = torch.mm(lm_eigenvec, sigma)
 
-                for k in range(10):
+                for k in range(5):
                     data = data3dmm[k]
 
                     # load the data
@@ -109,7 +109,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
                                 # differentiable PnP pose estimation
                                 km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
                                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                                 error_time = util.getTimeConsistency(shape,R,T)
 
                                 loss = error2d.mean() + 0.01*error_time
@@ -138,7 +138,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
                                 # differentiable PnP pose estimation
                                 km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
                                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                                 error_time = util.getTimeConsistency(shape,R,T)
 
                                 loss = error2d.mean() + 0.01*error_time

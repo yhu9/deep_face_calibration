@@ -73,7 +73,10 @@ class TestData():
 class TestLoader(Dataset):
 
     def __init__(self,f,addnoise=True):
-        root_dir = os.path.join("../data/synthetic_3dface",f"sequencef{f:04d}")
+        if os.path.isdir("../data"):
+            root_dir = os.path.join("../data/synthetic_3dface",f"sequencef{f:04d}")
+        else:
+            root_dir = os.path.join("../data0/synthetic_3dface",f"sequencef{f:04d}")
         self.root_dir = root_dir
         self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
         self.files.sort()
@@ -124,7 +127,10 @@ class TestLoader(Dataset):
 
 class Cad60Loader(Dataset):
     def __init__(self):
-        self.root_dir = "/home/huynshen/tmp/cad60/processed"
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/cad60/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/cad60/processed")
         files = os.listdir(self.root_dir)
         files.sort()
 
@@ -159,7 +165,10 @@ class Cad60Loader(Dataset):
 
 class Cad120Loader(Dataset):
     def __init__(self):
-        self.root_dir = "/home/huynshen/tmp/cad120/processed"
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/cad120/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/cad120/processed")
         files = os.listdir(self.root_dir)
         files.sort()
 
@@ -195,7 +204,10 @@ class Cad120Loader(Dataset):
 class BIWIIDLoader(Dataset):
 
     def __init__(self):
-        self.root_dir = "/home/huynshen/tmp/biwi-i/processed"
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/biwi-i/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/biwi-i/processed")
         files = os.listdir(self.root_dir)
         files.sort()
 
@@ -230,7 +242,10 @@ class BIWIIDLoader(Dataset):
 
 class BIWILoader(Dataset):
     def __init__(self):
-        self.root_dir = "/home/huynshen/tmp/biwi/processed"
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/biwi/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/biwi/processed")
         files = os.listdir(self.root_dir)
         files.sort()
 
@@ -267,7 +282,10 @@ class BIWILoader(Dataset):
 class AblationLoader(Dataset):
 
     def __init__(self):
-        self.root_dir = "/home/huynshen/tmp/biwi/processed"
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/biwi/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/biwi/processed")
         shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         subjects = [f"{sub:02d}" for sub in range(1,25)]
 
