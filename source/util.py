@@ -40,7 +40,6 @@ def getControlPoints(Pw):
 #   Pw              (b,N,3)
 #Output:
 #   control_w       (bx4x4)
-
 def getBatchControlPoints(Pw):
     b = Pw.shape[0]
     if Pw.is_cuda:
@@ -84,10 +83,11 @@ def getControlPoints(Pw):
 #Output:
 # alphas            (3,N)
 def solveAlphas(Pw,control_w):
+    N = Pw.shape[0]
     if Pw.is_cuda:
-        ones = torch.ones((1,68)).cuda()
+        ones = torch.ones((1,N)).cuda()
     else:
-        ones = torch.ones((1,68))
+        ones = torch.ones((1,N))
     ph_w = torch.cat([Pw.T,ones],dim=0)
     alphas, LU = torch.solve(ph_w,control_w)
 
@@ -277,58 +277,41 @@ def getExtrinsics(x_c,p_w):
 
     return R,T
 
-# batched reprojection error using intrinsics and extrinsics on world coordinates
-#
-#INPUT:
-#   pimg                (M,2,N)
-#   pw                  (N,3)
-#   R                   (M,3,3)
-#   T                   (M,3)
-#   A                   (3,3)
-#
-#OUTPUT:
-#   error               (M)
-def getReprojError2(pimg,pw,R,T,A,show=False,loss='l2'):
+# pts       (b,M,2,N)
+# shape     (b,N,3)
+# K         (3,3)
+# xc_gt     (b,M,3,N)
+# xw_gt     (b,N,3)
+def getBatchError(pts,shape,K,xc_gt,xw_gt):
+    e2d = []
+    e3d = []
+    e2d_all = []
+    e3d_all = []
+    d_all = []
+    b = pts.shape[0]
+    for i in range(b):
+        pW = shape[i]
+        pI = pts[i]
+        pC = xc_gt[i]
+        M = pI.shape[0]
+        km, c_w, scaled_betas, alphas = EPnP(pI,pW,K)
+        Xc, R, T, mask = optimizeGN(km,c_w,scaled_betas,alphas,pW,pI,K)
 
-    M = pimg.shape[0]
-    N = pimg.shape[1]
-    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
-    pct = pc + T.unsqueeze(2)
-    proj = torch.bmm(torch.stack(M*[A]),pct)
-    proj_img = proj / proj[:,-1,:].unsqueeze(1)
+        error2d = getReprojError2(pI,pW,R,T,K,loss='l2')
+        error3d = getRelReprojError3(pC,pW,R,T)
+        d = torch.norm(pC,p=2,dim=1).mean(1)
 
-    pimg_pred = proj_img[:,:2,:]
-    diff = pimg - pimg_pred
-    if loss == 'l2':
-        error  = torch.norm(diff,p=2,dim=1).mean(1)
-    elif loss == 'l1':
-        error = torch.abs(diff)
+        e2d.append(error2d.mean())
+        e3d.append(error3d.mean())
+        e2d_all.append(error2d)
+        e3d_all.append(error3d)
+        d_all.append(d)
 
-    if show:
-        import pptk
-        x = pct[-1].T.detach().cpu().numpy()
-        v = pptk.viewer(x)
-        v.set(point_size=1.1)
-        pct[0].T
-        #for i in range(M):
-        #    pt1 = pimg[i].T.cpu().numpy()
-        #    scatter(pt1)
-        pta = pimg[0].T.cpu().numpy()
-        ptb = pimg[-1].T.cpu().numpy()
-        ptc = pimg_pred[0].detach().T.cpu().numpy()
-        ptd = pimg_pred[-1].detach().T.cpu().numpy()
-        plt.scatter(pta[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
-        plt.scatter(ptb[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
-        plt.scatter(pta[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
-        plt.scatter(ptb[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+    errorShape = torch.mean(torch.norm(xw_gt - shape,dim=2),dim=1)
 
-        plt.xlim((-320,320))
-        plt.ylim((-240,240))
-        plt.show()
+    return torch.stack(e2d),torch.stack(e3d),errorShape,torch.stack(e2d_all),torch.stack(e3d_all),torch.stack(d_all)
 
-        quit()
 
-    return error
 
 def getError2(pimg,pcam,A,show=False):
     M = pimg.shape[0]
@@ -448,6 +431,15 @@ def getRelPCError(xcam,ximg,kinv,mode='l1'):
         l2_reldiff = torch.mean(torch.log(torch.sum(torch.pow(diff,2),1) / torch.pow(xcam[:,2,:],2)))
         return l2_reldiff
 
+# getTimeConsistency(pW,R,T)
+def getTimeConsistency(pW,R,T):
+    M = R.shape[0]
+    pc = torch.bmm(R,torch.stack(M*[pW]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+
+    error = torch.mean(torch.norm(pct[:M-1,:,:] - pct[1:,:,:],dim=1))
+    return error
+
 #INPUT:
 # T     (M,3)
 #OUTPUT:
@@ -482,25 +474,28 @@ def getRConsistency(R):
 #OUTPUT:
 # SCALAR
 def get3DConsistency(pI,pW,kinv,R,T):
+    kinv[0,0] = 1/100
+    kinv[1,1] = 1/100
     M = pI.shape[0]
     N = pI.shape[2]
 
     pC = torch.bmm(R,torch.stack(M*[pW.T])) + T.unsqueeze(2)
     z = pC[:,2,:]
     ones = torch.ones(M,1,N).to(pI.device)
+
     pI_h = torch.cat((pI,ones),dim=1)
     pI_proj = torch.bmm(torch.stack(M*[kinv]),pI_h)
     pC_proj = pI_proj * z.unsqueeze(1)
 
     le_gt = torch.mean(pW[36:42,:],dim=0)
     re_gt = torch.mean(pW[42:48,:],dim=0)
-    d_gt = torch.sum(torch.pow(le_gt - re_gt,2))
+    d_gt = torch.norm(le_gt - re_gt)
 
-    le = torch.mean(pC_proj[0,:,36:42],dim=1)
-    re = torch.mean(pC_proj[0,:,42:48],dim=1)
-    d = torch.sum(torch.pow(le - re,2))
+    le = torch.mean(pC_proj[:,:,36:42],dim=2)
+    re = torch.mean(pC_proj[:,:,42:48],dim=2)
+    d = torch.norm(le - re,dim=1)
 
-    return torch.abs(d - d_gt)
+    return torch.mean(torch.abs(d - d_gt))
 
 # batched reprojection error using intrinsics and extrinsics on world coordinates
 #
@@ -519,26 +514,123 @@ def getRelReprojError3(xcam,pw,R,T):
     pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
     pct = pc + T.unsqueeze(2)
 
-    '''
-    import pptk
-    x1 = xcam[1].T
-    x2 = pct[1].T
-    x1 = x1.cpu().data.numpy()
-    x2 = x2.cpu().data.numpy()
-    print(pct[1])
-    print(xcam[1])
-    print(T[1])
-    quit()
-    pts = np.concatenate((x1,x2),axis=0)
-    pptk.viewer(pts)
-    quit()
-    '''
+    #import pptk
+    #x1 = xcam[1].T
+    #x2 = pct[1].T
+    #x1 = x1.cpu().data.numpy()
+    #x2 = x2.cpu().data.numpy()
+    #pts = np.concatenate((x1,x2),axis=0)
 
     diff = pct - xcam
     d = torch.norm(xcam,p=2,dim=1)
     error = torch.norm(diff,p=2,dim=1)
+
+    #print(torch.mean(error/d,dim=1).mean())
+    #v = pptk.viewer(pts)
+    #v.set(point_size=10)
+    #quit()
     return torch.mean(error / d,dim=1)
 
+# batched reprojection error using intrinsics and extrinsics on world coordinates
+#
+#INPUT:
+#   pimg                (M,2,N)
+#   pw                  (N,3)
+#   R                   (M,3,3)
+#   T                   (M,3)
+#   A                   (3,3)
+#
+#OUTPUT:
+#   error               (M)
+def getReprojError2_(pimg,pct,A,show=False,loss='l2'):
+
+    M = pimg.shape[0]
+    N = pimg.shape[2]
+    proj = torch.bmm(torch.stack(M*[A]),pct)
+    proj_img = proj / proj[:,-1,:].unsqueeze(1)
+
+    pimg_pred = proj_img[:,:2,:]
+    diff = pimg - pimg_pred
+    if loss == 'l2':
+        error  = torch.norm(diff,p=2,dim=1).mean(1)
+    elif loss == 'l1':
+        error = torch.abs(diff)
+
+    if show:
+        #import pptk
+        #x = pct[-1].T.detach().cpu().numpy()
+        #v = pptk.viewer(x)
+        #v.set(point_size=1.1)
+        #for i in range(M):
+        #    pt1 = pimg[i].T.cpu().numpy()
+        #    scatter(pt1)
+        pta = pimg[0].T.cpu().numpy()
+        ptb = pimg[-1].T.cpu().numpy()
+        ptc = pimg_pred[0].detach().T.cpu().numpy()
+        ptd = pimg_pred[-1].detach().T.cpu().numpy()
+        plt.scatter(pta[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        #plt.scatter(ptb[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        plt.scatter(ptb[:,0],ptb[:,1],s=10,marker='.',edgecolors='red')
+        #plt.scatter(ptb[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+
+        #plt.xlim((-320,320))
+        #plt.ylim((-240,240))
+        plt.show()
+
+        quit()
+
+    return error
+# batched reprojection error using intrinsics and extrinsics on world coordinates
+#
+#INPUT:
+#   pimg                (M,2,N)
+#   pw                  (N,3)
+#   R                   (M,3,3)
+#   T                   (M,3)
+#   A                   (3,3)
+#
+#OUTPUT:
+#   error               (M)
+def getReprojError2(pimg,pw,R,T,A,show=False,loss='l2'):
+
+    M = pimg.shape[0]
+    N = pimg.shape[2]
+    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+    proj = torch.bmm(torch.stack(M*[A]),pct)
+    proj_img = proj / proj[:,-1,:].unsqueeze(1)
+
+    pimg_pred = proj_img[:,:2,:]
+    diff = pimg - pimg_pred
+    if loss == 'l2':
+        error  = torch.norm(diff,p=2,dim=1).mean(1)
+    elif loss == 'l1':
+        error = torch.abs(diff)
+
+    if show:
+        #import pptk
+        #x = pct[-1].T.detach().cpu().numpy()
+        #v = pptk.viewer(x)
+        #v.set(point_size=1.1)
+        #for i in range(M):
+        #    pt1 = pimg[i].T.cpu().numpy()
+        #    scatter(pt1)
+
+        pta = pimg[0].T.cpu().numpy()
+        ptb = pimg[-1].T.cpu().numpy()
+        ptc = pimg_pred[0].detach().T.cpu().numpy()
+        ptd = pimg_pred[-1].detach().T.cpu().numpy()
+        plt.scatter(pta[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        #plt.scatter(ptb[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        plt.scatter(ptc[:,0],ptc[:,1],s=10,marker='.',edgecolors='red')
+        #plt.scatter(ptb[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+
+        #plt.xlim((-320,320))
+        #plt.ylim((-240,240))
+        plt.show()
+        quit()
+
+    return error
 # computes the beta values as b11,b12,b22 in that order using distance constraints
 #Input:
 #   v                   (Mx12x2)
@@ -1112,7 +1204,6 @@ def EPnP(x_img,x_w,K):
         print(f)
         print(x_w)
     #    quit()
-
     # get last 4 eigenvectors
     u,d,v = torch.svd(Matrix)
     #try:

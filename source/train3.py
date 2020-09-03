@@ -28,15 +28,13 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
     calib_net = CalibrationNet3(n=1)
     sfm_net = CalibrationNet3(n=199)
     if modelin != "":
-        #model_dict = model.state_dict()
-        #pretrained_dict = torch.load(modelin)
-        #pretrained_dict = {k: v for k,v in pretrained_dict.items() if k in model_dict}
-        #model_dict.update(pretrained_dict)
-        #model.load_state_dict(pretrained_dict)
-        model.load_state_dict(torch.load(modelin))
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        calib_net.load_state_dict(torch.load(calib_path))
+        sfm_net.load_state_dict(torch.load(sfm_path))
     calib_net.to(device=device)
     sfm_net.to(device=device)
-    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-3)
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-3)
 
     # dataloader
@@ -49,7 +47,10 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
     mu_lm[:,2] = mu_lm[:,2] * -1
     mu_lm = torch.stack(batch_size * [mu_lm.to(device=device)])
     shape = mu_lm
-    lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float().to(device=device)
+    lm_eigenvec = torch.from_numpy(data.lm_eigenvec).float().to(device=device).detach()
+    sigma = torch.from_numpy(data.sigma).float().to(device=device).detach()
+    sigma = torch.diag(sigma.squeeze())
+    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
     lm_eigenvec = torch.stack(batch_size * [lm_eigenvec])
 
     M = data.M
@@ -58,7 +59,6 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
     # main training loop
     for epoch in itertools.count():
         for j,batch in enumerate(loader):
-
             # get the input and gt values
             x_cam_gt = batch['x_cam_gt'].to(device=device)
             shape_gt = batch['x_w_gt'].to(device=device)

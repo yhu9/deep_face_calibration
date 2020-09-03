@@ -125,6 +125,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     all_f = []
     all_fpred = []
     all_depth = []
+    out_shape = []
+    out_f = []
 
     seterror_3d = []
     seterror_rel3d = []
@@ -139,6 +141,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
         # create dataloader
         loader = dataloader.TestLoader(f_test)
 
+        f_pred = []
+        shape_pred = []
         error_2d = []
         error_3d = []
         error_rel3d = []
@@ -179,6 +183,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
             shape = mu_lm
             ini_pose = torch.zeros((M,6))
             ini_pose[:,5] = 99
+            curloss = 100
             for outerloop in itertools.count():
                 # camera calibration
                 shape = shape.detach()
@@ -202,10 +207,12 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # loss
                     loss = ((pred - x2d)**2).mean()
+                    if iter == 5: break
                     if iter > 10 and prev_loss < loss:
                         break
                     else:
                         prev_loss = loss
+                    if iter > 100: break
                     loss.backward()
                     opt1.step()
                     print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
@@ -222,7 +229,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
                     shape = model2(torch.ones(1,3,32,32)).view(N,3)
                     le = torch.mean(shape[36:42,:],axis=0)
                     re = torch.mean(shape[42:48,:],axis=0)
-                    pred_ipd = torch.norm(le - re)
+                    pred_ipd = torch.norm(le - re).detach()
                     shape = (ipd/pred_ipd) * shape
 
                     #v.load(shape.detach().cpu().numpy())
@@ -233,8 +240,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # focal length prediction
                     K = torch.zeros((3,3)).float()
-                    K[0,0] = 400
-                    K[1,1] = 400
+                    K[0,0] = f
+                    K[1,1] = f
                     K[2,2] = 1
 
                     # differentiable pose estimation
@@ -243,16 +250,19 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
 
                     # loss
                     loss = ((pred - x2d)**2).mean()
+                    if iter == 5: break
                     if iter > 10 and prev_loss < loss:
                         break
                     else:
                         prev_loss = loss
+                    if iter > 100: break
                     loss.backward()
                     opt2.step()
                     print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | rmse: {rmse.item():.2f}")
 
                 # closing condition for outerloop on dual objective
-                if outerloop == 2: break
+                if torch.abs(curloss - loss) < 0.01: break
+                curloss = loss
 
             all_fpred.append(f.numpy()[0])
 
@@ -260,15 +270,20 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
             km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
             Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
 
+
             # get errors
             reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
-            reproj_errors3 = util.getReprojError3(x_cam_gt,shape,R,T)
+            reproj_errors3 = torch.norm(shape_gt - shape,dim=1).mean()
             rel_errors =  util.getRelReprojError3(x_cam_gt,shape,R,T)
 
             reproj_error = reproj_errors2.mean()
             reconstruction_error = reproj_errors3.mean()
             rel_error = rel_errors.mean()
             f_error = torch.abs(fgt - f) / fgt
+
+            # save final prediction
+            f_pred.append(f.detach().cpu().item())
+            shape_pred.append(shape.detach().cpu().numpy())
 
             allerror_3d.append(reproj_error.data.numpy())
             allerror_2d.append(reconstruction_error.data.numpy())
@@ -291,6 +306,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
         seterror_3d.append(avg_3d)
         seterror_rel3d.append(avg_rel3d)
         seterror_relf.append(avg_relf)
+        out_f.append(np.stack(f_pred))
+        out_shape.append(np.stack(shape_pred,axis=0))
         #end for
 
     all_f = np.stack(all_f).flatten()
@@ -301,7 +318,7 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     allerror_rel3d = np.stack(allerror_rel3d).flatten()
 
     matdata = {}
-    matdata['shape'] = shape.detach().cpu().numpy()
+    #matdata['shape'] = shape.detach().cpu().numpy()
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
     matdata['all_fpred'] = np.array(all_fpred)
@@ -313,6 +330,8 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.feat_trans):
     matdata['seterror_3d'] = np.array(seterror_3d)
     matdata['seterror_rel3d'] = np.array(seterror_rel3d)
     matdata['seterror_relf'] = np.array(seterror_relf)
+    matdata['shape'] = np.stack(out_shape)
+    matdata['f'] = np.stack(out_f)
     scipy.io.savemat(outfile,matdata)
 
     print(f"MEAN seterror_2d: {np.mean(seterror_2d)}")

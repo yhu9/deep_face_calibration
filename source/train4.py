@@ -6,9 +6,8 @@ import os
 import torch
 import torch.optim
 
-from model import Model1
-from model import CalibrationNet3
-from model import AdjustmentNet
+from model import PointNet
+from test4 import test
 import dataloader
 import util
 
@@ -26,16 +25,28 @@ args = parser.parse_args()
 def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    calib_net = CalibrationNet3(n=1)
-    sfm_net = CalibrationNet3(n=199)
-    adj_net = AdjustmentNet()
+    calib_net = PointNet(n=1)
+    sfm_net = PointNet(n=199)
+    if modelin != "":
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        pretrained1 = torch.load(calib_path)
+        pretrained2 = torch.load(sfm_path)
+        calib_dict = calib_net.state_dict()
+        sfm_dict = sfm_net.state_dict()
+
+        pretrained1 = {k: v for k,v in pretrained1.items() if k in calib_dict}
+        pretrained2 = {k: v for k,v in pretrained2.items() if k in sfm_dict}
+        calib_dict.update(pretrained1)
+        sfm_dict.update(pretrained2)
+
+        calib_net.load_state_dict(pretrained1)
+        sfm_net.load_state_dict(pretrained2)
 
     calib_net.to(device=device)
     sfm_net.to(device=device)
-    adj_net.to(device=device)
     opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-3)
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-3)
-    opt3 = torch.optim.Adam(adj_net.parameters(),lr=1e-3)
 
     # dataloader
     data = dataloader.Data()
@@ -70,126 +81,37 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
             one = torch.ones(batch_size,M*N,1).to(device=device)
             x_img_one = torch.cat([x_img,one],dim=2)
             x_cam_pt = x_cam_gt.permute(0,1,3,2).reshape(batch_size,6800,3)
-            x = x_img.permute(0,2,1).reshape(batch_size,2,M,N)
+            x = x_img.permute(0,2,1)
+            #x = x_img.permute(0,2,1).reshape(batch_size,2,M,N)
 
             ptsI = x_img_one.reshape(batch_size,M,N,3).permute(0,1,3,2)[:,:,:2,:]
 
             # if just optimizing
             if not opt:
-                # point adjustment
-                delta = adj_net(x)
-                pred = delta + x
-
                 # calibration
-                f = calib_net(pred) + 300
+                f = calib_net(x) + 300
                 K = torch.zeros((batch_size,3,3)).float().to(device=device)
                 K[:,0,0] = f.squeeze()
                 K[:,1,1] = f.squeeze()
                 K[:,2,2] = 1
 
                 # sfm
-                betas = sfm_net(pred)
+                betas = sfm_net(x)
                 betas = betas.unsqueeze(-1)
                 shape = mu_lm + torch.bmm(lm_eigenvec,betas).squeeze().view(batch_size,N,3)
 
                 opt1.zero_grad()
                 opt2.zero_grad()
-                opt3.zero_grad()
                 f_error = torch.mean(torch.abs(f - fgt))
-                error2d = torch.mean(torch.abs(pred - x_img_gt))
+                #error2d = torch.mean(torch.abs(pred - x_img_gt))
                 error3d = torch.mean(torch.abs(shape - shape_gt))
-                error = f_error + error2d + error3d
+                error = f_error + error3d
                 error.backward()
                 opt1.step()
                 opt2.step()
-                opt3.step()
 
-                print(f"f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} | error2d: {error2d.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
+                print(f"f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
                 continue
-
-            # dual optimization
-            for outerloop in itertools.count():
-                # calibration
-                shape = shape.detach()
-                for iter in itertools.count():
-                    opt1.zero_grad()
-                    f = calib_net(x)
-                    f = f + 300
-                    K = torch.zeros((batch_size,3,3)).float().to(device=device)
-                    K[:,0,0] = f.squeeze()
-                    K[:,1,1] = f.squeeze()
-                    K[:,2,2] = 1
-
-                    # ground truth l1 error
-                    f_error = torch.mean(torch.abs(f - fgt))
-
-                    # differentiable PnP pose estimation
-                    error1 = []
-                    for i in range(batch_size):
-                        km, c_w, scaled_betas, alphas = util.EPnP(ptsI[i],shape[i],K[i])
-                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape[i],ptsI[i],K[i])
-                        error2d = util.getReprojError2(ptsI[i],shape[i],R,T,K[i],show=False,loss='l1')
-                        error1.append(error2d.mean())
-
-                    # batched loss
-                    #loss1 = torch.stack(error1).mean() + f_error
-                    loss1 = f_error
-
-                    # stopping condition
-                    if iter == 20: break
-                    #if iter > 10 and prev_loss < loss1: break
-                    #else: prev_loss = loss1
-
-                    # optimize network
-                    loss1.backward()
-                    opt1.step()
-                    print(f"iter: {iter} | error: {loss1.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
-
-                # structure from motion
-                f = f.detach()
-                for iter in itertools.count():
-                    opt2.zero_grad()
-
-                    betas = sfm_net(x)
-                    betas = betas.unsqueeze(-1)
-                    shape = mu_lm + torch.bmm(lm_eigenvec,betas).squeeze().view(batch_size,N,3)
-
-                    K = torch.zeros((batch_size,3,3)).float().to(device=device)
-                    K[:,0,0] = f.squeeze()
-                    K[:,1,1] = f.squeeze()
-                    K[:,2,2] = 1
-
-                    # ground truth shape error
-                    error3d = torch.mean(torch.abs(shape - shape_gt))
-
-                    # differentiable PnP pose estimation
-                    error2 = []
-                    for i in range(batch_size):
-                        km, c_w, scaled_betas, alphas = util.EPnP(ptsI[i],shape[i],K[i])
-                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape[i],ptsI[i],K[i])
-                        error2d = util.getReprojError2(ptsI[i],shape[i],R,T,K[i],show=False,loss='l1')
-                        error2.append(error2d.mean())
-
-                    # batched loss
-                    loss2 = torch.stack(error2).mean() + error3d
-
-                    # stopping condition
-                    if iter == 20: break
-                    #if iter > 10 and prev_loss < loss2: break
-                    #else: prev_loss = loss2
-
-                    # optimize network
-                    loss2.backward()
-                    opt2.step()
-                    print(f"iter: {iter} | error: {loss2.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f}")
-
-                # outerloop stopping condition
-                #if outerloop == 1: break
-                if outerloop == 2: break
-
-            # get errors
-            #rmse = torch.mean(torch.abs(shape - shape_gt))
-            #f_error = torch.mean(torch.abs(fgt - f) / fgt)
 
             # get shape error from image projection
             print(f"f/fgt: {f[0].item():.3f}/{fgt[0].item():.3f} | rmse: {rmse:.3f} | f_rel: {f_error.item():.4f}  | loss1: {loss1.item():.3f} | loss2: {loss2.item():.3f}")
@@ -198,7 +120,7 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
         print("saving!")
         torch.save(sfm_net.state_dict(), os.path.join('model','sfm_'+modelout))
         torch.save(calib_net.state_dict(), os.path.join('model','calib_'+modelout))
-        torch.save(adj_net.state_dict(),os.path.join('model','adj_'+modelout))
+        test(modelin=args.out,outfile=args.out,optimize=False)
         #decay.step()
 
 
