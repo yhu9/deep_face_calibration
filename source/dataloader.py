@@ -419,7 +419,10 @@ class AnalysisLoader(Dataset):
     def __init__(self,M=100,N=68,f=1000):
 
         #self.transform = transforms.Compose([ToTensor()])
-        root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
+        if os.path.isdir("../data"):
+            root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
+        else:
+            root_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
         shape_data = scipy.io.loadmat(root_dir)
 
         # load shape data
