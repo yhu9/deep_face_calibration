@@ -7,7 +7,6 @@ import torch.optim
 import numpy as np
 import pptk
 
-from logger import Logger
 from model import Model1
 import dataloader
 import util
@@ -26,8 +25,6 @@ args = parser.parse_args()
 def train(modelin=args.model, modelout=args.out,log=args.log,logname=args.logname):
     # define logger
     #torch.manual_seed(6)
-    if log:
-        logger = Logger(logname)
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
     torch.manual_seed(2)

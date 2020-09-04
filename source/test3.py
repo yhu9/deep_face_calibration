@@ -27,6 +27,13 @@ def trainfc(model):
         if 'fc' in name and 'feat' not in name:
             param.requires_grad = True
 
+
+# apply dual optimization on two networks
+def dualoptimization(calib_net,sfm_net):
+    f=1
+    shape=1
+    return f, shape
+
 def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
     # define model, dataloader, 3dmm eigenvectors, optimization method
     calib_net = CalibrationNet3(n=1)
@@ -83,7 +90,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(sfm_net)
 
             opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
+            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-5)
             curloss = 100
 
             for outerloop in itertools.count():
@@ -127,6 +134,8 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
                     betas = sfm_net.forward2(x)
                     shape = torch.sum(betas * lm_eigenvec,1)
                     shape = shape.reshape(68,3) + mu_lm
+                    shape = shape - shape.mean(0).unsqueeze(0)
+
                     K = torch.zeros((3,3)).float()
                     K[0,0] = f
                     K[1,1] = f
@@ -254,7 +263,7 @@ def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(sfm_net)
 
             opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
+            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-5)
             curloss = 100
 
             for outerloop in itertools.count():
@@ -297,6 +306,7 @@ def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
                     betas = sfm_net.forward2(x)
                     shape = torch.sum(betas * lm_eigenvec,1)
                     shape = shape.reshape(68,3) + mu_lm
+                    shape = shape - shape.mean(0).unsqueeze(0)
                     K = torch.zeros((3,3)).float()
                     K[0,0] = f
                     K[1,1] = f
@@ -491,6 +501,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
                         betas = sfm_net.forward2(x)
                         shape = torch.sum(betas * lm_eigenvec,1)
                         shape = shape.reshape(68,3) + mu_lm
+                        shape = shape - shape.mean(0).unsqueeze(0)
                         K = torch.zeros((3,3)).float()
                         K[0,0] = f
                         K[1,1] = f

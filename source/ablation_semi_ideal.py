@@ -77,6 +77,9 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
         N = 68;
         batch_size = 1;
 
+        training_pred = np.zeros((10,100,68,3))
+        training_gt = np.zeros((10,100,68,3))
+
         for j,data in enumerate(loader):
             if j == 10: break
             # load the data
@@ -95,7 +98,7 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
 
             # test camera calibration
             #calib_net.load_state_dict(torch.load(calib_path))
-            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-4)
+            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-5)
             sfm_net.eval()
             trainfc(sfm_net)
             f = 2000;
@@ -104,8 +107,11 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
 
                 # shape prediction
                 betas = sfm_net.forward2(x)
+                betas = torch.clamp(betas,-20,20)
                 shape = torch.sum(betas * lm_eigenvec,1)
                 shape = shape.reshape(68,3) + mu_lm
+                shape = shape - shape.mean(0).unsqueeze(0)
+
                 rmse = torch.norm(shape_gt - shape,dim=1).mean().detach()
                 K = torch.zeros((3,3)).float()
                 K[0,0] = f
@@ -113,14 +119,17 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
                 K[2,2] = 1
                 km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                 error_time = util.getTimeConsistency(shape,R,T)
+
                 loss = error2d.mean() + 0.01*error_time
                 loss.backward()
                 opt2.step()
                 print(f"iter: {iter} | error: {loss.item():.3f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse.item():.3f} ")
 
                 if iter == 100: break
+                training_pred[j,iter,:,:] = shape.detach().cpu().numpy()
+                training_gt[j,iter,:,:] = shape_gt.detach().cpu().numpy()
 
             all_fpred.append(f.detach().numpy()[0])
 
@@ -161,7 +170,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
         out_shape.append(np.stack(shape_pred,axis=0))
         print(f"f_error_rel: {avg_relf:.4f}  | rel rmse: {avg_rel3d:.4f}    | 2d error: {reproj_error.item():.4f} |  rmse: {avg_3d:.4f}  |")
 
-    out_shape = np.stack(out_shape)
     out_f = np.stack(out_f)
     all_f = np.stack(all_f).flatten()
     all_fpred = np.stack(all_fpred).flatten()
@@ -171,6 +179,8 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
     allerror_rel3d = np.stack(allerror_rel3d).flatten()
 
     matdata = {}
+    matdata['training_pred'] = training_pred
+    matdata['training_gt'] = training_gt
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
     matdata['all_fpred'] = np.array(all_fpred)
@@ -182,7 +192,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
     matdata['seterror_3d'] = np.array(seterror_3d)
     matdata['seterror_rel3d'] = np.array(seterror_rel3d)
     matdata['seterror_relf'] = np.array(seterror_relf)
-    matdata['shape'] = np.stack(out_shape)
     matdata['f'] = np.stack(out_f)
     scipy.io.savemat(outfile,matdata)
 
@@ -226,6 +235,7 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
     seterror_relf = []
     seterror_2d = []
     f_vals = [i*100 for i in range(4,15)]
+
     for f_test in f_vals:
         # create dataloader
         #f_test = 1000
@@ -241,6 +251,9 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
         N = 68;
         batch_size = 1;
 
+        training_pred = np.zeros((10,100,1))
+        training_gt = np.zeros((10,100,1))
+
         for j,data in enumerate(loader):
             if j == 10: break
             # load the data
@@ -250,6 +263,9 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
             x_img = data['x_img']
             x_img_gt = data['x_img_gt']
             T_gt = data['T_gt']
+
+            training_pred = np.zeros((100,1))
+            training_gt = np.zeros((100,1))
 
             all_depth.append(np.mean(T_gt[:,2]))
             all_f.append(fgt.numpy()[0])
@@ -272,7 +288,7 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
                 K[2,2] = 1
                 km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+                error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
                 error_time = util.getTimeConsistency(shape,R,T)
                 loss = error2d.mean() + 0.01*error_time
                 loss.backward()
@@ -280,6 +296,8 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
                 print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
 
                 if iter == 100: break
+                training_pred[j,iter] = f.detach().cpu().item()
+                training_gt[j,iter] = fgt.detach().cpu().item()
 
             all_fpred.append(f.detach().numpy()[0])
 
@@ -330,6 +348,8 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
     allerror_rel3d = np.stack(allerror_rel3d).flatten()
 
     matdata = {}
+    matdata['training_pred'] = training_pred
+    matdata['training_gt'] = training_gt
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
     matdata['all_fpred'] = np.array(all_fpred)
