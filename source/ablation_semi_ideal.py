@@ -131,7 +131,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
                 training_pred[j,iter,:,:] = shape.detach().cpu().numpy()
                 training_gt[j,iter,:,:] = shape_gt.detach().cpu().numpy()
 
-            all_fpred.append(f.detach().numpy()[0])
 
             # get errors
             reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K,show=False)
@@ -144,7 +143,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
             f_error = torch.abs(fgt - f) / fgt
 
             # save final prediction
-            f_pred.append(f.detach().cpu().item())
             shape_pred.append(shape.detach().cpu().numpy())
 
             allerror_3d.append(reproj_error.data.numpy())
@@ -155,7 +153,7 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
             error_rel3d.append(rel_error.cpu().data.item())
             error_relf.append(f_error.cpu().data.item())
 
-            print(f"f/sequence: {f_test}/{j}  | f/fgt: {f[0].item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+            print(f"f/sequence: {f_test}/{j}  | f/fgt: {f:.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
 
         avg_2d = np.mean(error_2d)
         avg_rel3d = np.mean(error_rel3d)
@@ -166,13 +164,10 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
         seterror_3d.append(avg_3d)
         seterror_rel3d.append(avg_rel3d)
         seterror_relf.append(avg_relf)
-        out_f.append(np.stack(f_pred))
         out_shape.append(np.stack(shape_pred,axis=0))
         print(f"f_error_rel: {avg_relf:.4f}  | rel rmse: {avg_rel3d:.4f}    | 2d error: {reproj_error.item():.4f} |  rmse: {avg_3d:.4f}  |")
 
-    out_f = np.stack(out_f)
     all_f = np.stack(all_f).flatten()
-    all_fpred = np.stack(all_fpred).flatten()
     all_d = np.stack(all_depth).flatten()
     allerror_2d = np.stack(allerror_2d).flatten()
     allerror_3d = np.stack(allerror_3d).flatten()
@@ -183,7 +178,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
     matdata['training_gt'] = training_gt
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
-    matdata['all_fpred'] = np.array(all_fpred)
     matdata['all_d'] = np.array(all_depth)
     matdata['error_2d'] = allerror_2d
     matdata['error_3d'] = allerror_3d
@@ -192,7 +186,6 @@ def test_sfm(modelin=args.model,outfile=args.out,optimize=args.opt):
     matdata['seterror_3d'] = np.array(seterror_3d)
     matdata['seterror_rel3d'] = np.array(seterror_rel3d)
     matdata['seterror_relf'] = np.array(seterror_relf)
-    matdata['f'] = np.stack(out_f)
     scipy.io.savemat(outfile,matdata)
 
     print(f"MEAN seterror_2d: {np.mean(seterror_2d)}")
@@ -264,9 +257,6 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
             x_img_gt = data['x_img_gt']
             T_gt = data['T_gt']
 
-            training_pred = np.zeros((100,1))
-            training_gt = np.zeros((100,1))
-
             all_depth.append(np.mean(T_gt[:,2]))
             all_f.append(fgt.numpy()[0])
 
@@ -286,6 +276,7 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
                 K[0,0] = f
                 K[1,1] = f
                 K[2,2] = 1
+                rmse = torch.norm(shape_gt - shape,dim=1).mean().detach()
                 km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
                 error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
@@ -293,7 +284,7 @@ def test_calib(modelin=args.model,outfile=args.out,optimize=args.opt):
                 loss = error2d.mean() + 0.01*error_time
                 loss.backward()
                 opt1.step()
-                print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
+                print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse.item():.3f}")
 
                 if iter == 100: break
                 training_pred[j,iter] = f.detach().cpu().item()

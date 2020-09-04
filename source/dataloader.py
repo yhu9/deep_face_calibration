@@ -613,7 +613,10 @@ class SyntheticLoaderFull(Dataset):
     def __init__(self):
 
         #self.transform = transforms.Compose([ToTensor()])
-        root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+        if os.path.isdir("../data"):
+            root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+        else:
+            root_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
 
         # load shape data
         shape_data = scipy.io.loadmat(root_dir)
@@ -802,7 +805,10 @@ class SyntheticLoader(Dataset):
     def __init__(self):
 
         #self.transform = transforms.Compose([ToTensor()])
-        root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+        if os.path.isdir("../data"):
+            root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+        else:
+            root_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
 
         # load shape data
         shape_data = scipy.io.loadmat(root_dir)
