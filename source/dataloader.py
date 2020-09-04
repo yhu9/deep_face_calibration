@@ -284,9 +284,10 @@ class AblationLoader(Dataset):
     def __init__(self):
         if os.path.isdir("../data"):
             self.root_dir = os.path.join("../data/tmp/biwi/processed")
+            shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         else:
             self.root_dir = os.path.join("../data0/tmp/biwi/processed")
-        shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+            shape_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         subjects = [f"{sub:02d}" for sub in range(1,25)]
 
         shape_data = scipy.io.loadmat(shape_dir)
