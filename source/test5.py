@@ -23,10 +23,313 @@ args = parser.parse_args()
 
 np.random.seed(0)
 #########################################################
+
+data3dmm = dataloader.SyntheticLoader()
+mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
+mu_lm[:,2] = mu_lm[:,2]*-1
+lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
+sigma = torch.from_numpy(data3dmm.sigma).float().detach()
+sigma = torch.diag(sigma.squeeze())
+lm_eigenvec = torch.mm(lm_eigenvec, sigma)
+
 def trainfc(model):
     for name, param in model.named_parameters():
         if 'fc' in name and 'feat' not in name:
             param.requires_grad = True
+
+# dual optimization to optimize focal length and 3D shape
+def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
+
+    ptsI = x.squeeze().permute(1,0).reshape((M,N,2)).permute(0,2,1)
+    # run the model
+    f = calib_net(x) + 300
+    betas = sfm_net(x)
+    betas = betas.squeeze(0).unsqueeze(-1)
+    shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+    shape = shape - shape.mean(0).unsqueeze(0)
+
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-1)
+    curloss = 100
+    for outerloop in itertools.count():
+        shape = shape.detach()
+        for iter in itertools.count():
+            opt1.zero_grad()
+            f = calib_net(x) + 300
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+
+            # pose estimation
+            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+            error_time = util.getTimeConsistency(shape,R,T)
+
+            # apply loss
+            loss = error2d.mean() + 0.01*error_time
+            if iter == 5: break
+            loss.backward()
+            opt1.step()
+
+            # log results on console
+            if not shape_gt is None:
+                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+            else:
+                rmse = -1
+            if not fgt is None:
+                ftrue = fgt.item()
+            else:
+                fgt = -1
+            f_error = torch.mean(torch.abs(f-ftrue))
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
+
+        f = f.detach()
+        for iter in itertools.count():
+            opt2.zero_grad()
+
+            # shape prediction
+            betas = sfm_net(x)
+            shape = torch.sum(betas * lm_eigenvec,1)
+            shape = shape.reshape(68,3) + mu_lm
+            shape = shape - shape.mean(0).unsqueeze(0)
+            K = torch.zeros((3,3)).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+
+            # differentiable PnP pose estimation
+            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+            error_time = util.getTimeConsistency(shape,R,T)
+
+            # apply loss
+            loss = error2d.mean() + 0.01*error_time
+            if iter == 5: break
+            loss.backward()
+            opt2.step()
+
+            # log results on console
+            if not shape_gt is None:
+                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+            else:
+                rmse = -1
+            if not fgt is None:
+                ftrue = fgt.item()
+            else:
+                fgt = -1
+            f_error = torch.mean(torch.abs(f-ftrue))
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
+
+        if torch.abs(curloss  - loss) < 0.01: break
+        curloss = loss
+    return shape,K,R,T
+
+######################################################################################
+# testing on different datasets
+
+def testCad120(modelin=args.model,outfile=args.out,optimize=args.opt):
+    # define model, dataloader, 3dmm eigenvectors, optimization method
+    calib_net = PointNet(n=1)
+    sfm_net = PointNet(n=199)
+    if modelin != "":
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        calib_net.load_state_dict(torch.load(calib_path))
+        sfm_net.load_state_dict(torch.load(sfm_path))
+    calib_net.eval()
+    sfm_net.eval()
+
+    # mean shape and eigenvectors for 3dmm
+    data3dmm = dataloader.SyntheticLoader()
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
+    mu_lm[:,2] = mu_lm[:,2]*-1
+    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
+    sigma = torch.from_numpy(data3dmm.sigma).float().detach()
+    sigma = torch.diag(sigma.squeeze())
+    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
+
+    # define loader
+    loader = dataloader.Cad120Loader()
+    f_pred = []
+    shape_pred = []
+    error_2d = []
+    error_relf = []
+    error_rel3d = []
+    for sub in range(len(loader)):
+        batch = loader[sub]
+        x_cam_gt = batch['x_cam_gt']
+        fgt = batch['f_gt']
+        x_img = batch['x_img']
+        x_img_gt = batch['x_img_gt']
+        M = x_img_gt.shape[0]
+        N = 68
+
+        ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
+        x = x_img.unsqueeze(0).permute(0,2,1)
+
+        # run the model
+        f = calib_net(x) + 300
+        betas = sfm_net(x)
+        betas = betas.squeeze(0).unsqueeze(-1)
+        shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+
+        # additional optimization on initial solution
+        if optimize:
+            calib_net.load_state_dict(torch.load(calib_path))
+            sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
+            shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
+            f = K[0,0]
+        else:
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+
+        # get errors
+        reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
+        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
+
+        reproj_error = reproj_errors2.mean()
+        rel_error = rel_errors.mean()
+        f_error = torch.abs(fgt - f) / fgt
+
+        # save final prediction
+        f_pred.append(f.detach().cpu().item())
+        shape_pred.append(shape.detach().cpu().numpy())
+
+        error_2d.append(reproj_error.cpu().data.item())
+        error_rel3d.append(rel_error.cpu().data.item())
+        error_relf.append(f_error.cpu().data.item())
+
+        print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+        #end for
+
+    # prepare output file
+    out_shape = np.stack(shape_pred)
+    out_f = np.stack(f_pred)
+
+    matdata = {}
+    matdata['shape'] = np.stack(out_shape)
+    matdata['f'] = np.stack(out_f)
+    matdata['error_2d'] = np.array(error_2d)
+    matdata['error_rel3d'] = np.array(error_rel3d)
+    matdata['error_relf'] = np.array(error_relf)
+    scipy.io.savemat(outfile,matdata)
+
+    print(f"MEAN seterror_2d: {np.mean(error_2d)}")
+    print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
+    print(f"MEAN seterror_relf: {np.mean(error_relf)}")
+
+
+
+def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
+    # define model, dataloader, 3dmm eigenvectors, optimization method
+    calib_net = PointNet(n=1)
+    sfm_net = PointNet(n=199)
+    if modelin != "":
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        calib_net.load_state_dict(torch.load(calib_path))
+        sfm_net.load_state_dict(torch.load(sfm_path))
+    calib_net.eval()
+    sfm_net.eval()
+
+    # mean shape and eigenvectors for 3dmm
+    data3dmm = dataloader.SyntheticLoader()
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
+    mu_lm[:,2] = mu_lm[:,2]*-1
+    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
+    sigma = torch.from_numpy(data3dmm.sigma).float().detach()
+    sigma = torch.diag(sigma.squeeze())
+    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
+
+    # define loader
+    loader = dataloader.BIWILoader()
+    f_pred = []
+    shape_pred = []
+    error_2d = []
+    error_relf = []
+    error_rel3d = []
+    for sub in range(len(loader)):
+        batch = loader[sub]
+        x_cam_gt = batch['x_cam_gt']
+        fgt = batch['f_gt']
+        x_img = batch['x_img']
+        x_img_gt = batch['x_img_gt']
+        M = x_img_gt.shape[0]
+        N = 68
+
+        ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
+        x = x_img.unsqueeze(0).permute(0,2,1)
+
+        # run the model
+        f = calib_net(x) + 300
+        betas = sfm_net(x)
+        betas = betas.squeeze(0).unsqueeze(-1)
+        shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+
+        # additional optimization on initial solution
+        if optimize:
+            calib_net.load_state_dict(torch.load(calib_path))
+            sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
+            shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
+            f = K[0,0]
+        else:
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+
+        # get errors
+        reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
+        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
+
+        reproj_error = reproj_errors2.mean()
+        rel_error = rel_errors.mean()
+        f_error = torch.abs(fgt - f) / fgt
+
+        # save final prediction
+        f_pred.append(f.detach().cpu().item())
+        shape_pred.append(shape.detach().cpu().numpy())
+
+        error_2d.append(reproj_error.cpu().data.item())
+        error_rel3d.append(rel_error.cpu().data.item())
+        error_relf.append(f_error.cpu().data.item())
+
+        print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+        #end for
+
+    # prepare output file
+    out_shape = np.stack(shape_pred)
+    out_f = np.stack(f_pred)
+
+    matdata = {}
+    matdata['shape'] = np.stack(out_shape)
+    matdata['f'] = np.stack(out_f)
+    matdata['error_2d'] = np.array(error_2d)
+    matdata['error_rel3d'] = np.array(error_rel3d)
+    matdata['error_relf'] = np.array(error_relf)
+    scipy.io.savemat(outfile,matdata)
+
+    print(f"MEAN seterror_2d: {np.mean(error_2d)}")
+    print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
+    print(f"MEAN seterror_relf: {np.mean(error_relf)}")
+
 
 def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
     # define model, dataloader, 3dmm eigenvectors, optimization method
@@ -49,7 +352,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
     sigma = torch.diag(sigma.squeeze())
     lm_eigenvec = torch.mm(lm_eigenvec, sigma)
 
-    # define loader
+    # define loader and initialize logging variables
     loader = dataloader.BIWIIDLoader()
     f_pred = []
     d_pred = []
@@ -57,8 +360,6 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
     error_2d = []
     error_relf = []
     error_rel3d = []
-
-    # run the test on data
     for idx in range(len(loader)):
         data = loader[idx]
         x_cam_gt = data['x_cam_gt']
@@ -76,6 +377,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         betas = sfm_net(x)
         betas = betas.squeeze(0).unsqueeze(-1)
         shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+        shape = shape - shape.mean(0).unsqueeze(0)
 
         # apply dual optimization
         if optimize:
@@ -86,223 +388,8 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(calib_net)
             trainfc(sfm_net)
 
-            opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
-            curloss = 100
-            for outerloop in itertools.count():
-                shape = shape.detach()
-                for iter in itertools.count():
-                    opt1.zero_grad()
-                    f = calib_net(x)+300
-                    K = torch.zeros(3,3).float()
-                    K[0,0] = f
-                    K[1,1] = f
-                    K[2,2] = 1
-
-                    f_error = torch.mean(torch.abs(f - fgt))
-                    #rmse = torch.norm(shape_gt - shape,dim=1).mean()
-
-                    # differentiable PnP pose estimation
-                    km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-                    Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                    error_time = util.getTimeConsistency(shape,R,T)
-
-                    loss = error2d.mean() + 0.001*error_time
-                    if iter == 5: break
-                    loss.backward()
-                    opt1.step()
-                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                # sfm
-                f = f.detach()
-                for iter in itertools.count():
-                    opt2.zero_grad()
-
-                    # shape prediction
-                    betas = sfm_net(x)
-                    shape = torch.sum(betas * lm_eigenvec,1)
-                    shape = shape.reshape(68,3) + mu_lm
-                    K = torch.zeros((3,3)).float()
-                    K[0,0] = f
-                    K[1,1] = f
-                    K[2,2] = 1
-
-                    # differentiable PnP pose estimation
-                    km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-                    Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                    error_time = util.getTimeConsistency(shape,R,T)
-                    #loss = rmse
-
-                    loss = error2d.mean() + 0.001*error_time
-                    if iter == 5: break
-                    loss.backward()
-                    opt2.step()
-                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                # closing condition for outerloop on dual objective
-                if torch.abs(curloss - loss) < 0.01: break
-                curloss = loss
-
-        # get final result to save
-        K = torch.zeros(3,3).float()
-        K[0,0] = f
-        K[1,1] = f
-        K[2,2] = 1
-        km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-        depth = torch.norm(torch.mean(Xc,dim=-1),dim=1)
-
-        # get errors
-        reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
-        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
-
-        reproj_error = reproj_errors2.mean()
-        rel_error = rel_errors.mean()
-        f_error = torch.abs(fgt - f) / fgt
-
-        # save final prediction
-        f_pred.append(f.detach().cpu().item())
-        d_pred.append(depth.detach().cpu().numpy())
-        shape_pred.append(shape.detach().cpu().numpy())
-
-        error_2d.append(reproj_error.cpu().data.item())
-        error_rel3d.append(rel_error.cpu().data.item())
-        error_relf.append(f_error.cpu().data.item())
-
-        print(f" f/fgt: {f[0].item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-
-    # prepare output file
-    matdata = {}
-    matdata['f_pred'] = np.stack(f_pred)
-    matdata['d_pred'] = np.concatenate(d_pred)
-    matdata['shape_pred'] = np.stack(shape_pred)
-    matdata['error_2d'] = np.array(error_2d)
-    matdata['error_relf'] = np.array(error_relf)
-    matdata['error_rel3d'] = np.stack(error_rel3d)
-    scipy.io.savemat(outfile,matdata)
-
-    print(f"MEAN seterror_2d: {np.mean(error_2d)}")
-    print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
-    print(f"MEAN seterror_relf: {np.mean(error_relf)}")
-
-def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
-    # define model, dataloader, 3dmm eigenvectors, optimization method
-    calib_net = PointNet(n=1)
-    sfm_net = PointNet(n=199)
-    if modelin != "":
-        calib_path = os.path.join('model','calib_' + modelin)
-        sfm_path = os.path.join('model','sfm_' + modelin)
-        calib_net.load_state_dict(torch.load(calib_path))
-        sfm_net.load_state_dict(torch.load(sfm_path))
-    calib_net.eval()
-    sfm_net.eval()
-
-    # mean shape and eigenvectors for 3dmm
-    data3dmm = dataloader.SyntheticLoader()
-    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
-    mu_lm[:,2] = mu_lm[:,2]*-1
-    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
-    sigma = torch.from_numpy(data3dmm.sigma).float().detach()
-    sigma = torch.diag(sigma.squeeze())
-    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
-
-    # define loader
-    loader = dataloader.createLoader(db)
-    f_pred = []
-    d_pred = []
-    shape_pred = []
-    error_2d = []
-    error_relf = []
-    error_rel3d = []
-
-    # run the test on data
-    for idx in range(len(loader)):
-        data = loader[idx]
-        x_cam_gt = data['x_cam_gt']
-        fgt = data['f_gt']
-        x_img = data['x_img']
-        x_img_gt = data['x_img_gt']
-        M = x_img_gt.shape[0]
-        N = 68
-
-        ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
-        x = x_img.unsqueeze(0).permute(0,2,1)
-
-        # run the model
-        f = calib_net(x) + 300
-        betas = sfm_net(x)
-        betas = betas.squeeze(0).unsqueeze(-1)
-        shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
-
-        # apply dual optimization
-        if optimize:
-            calib_net.load_state_dict(torch.load(calib_path))
-            sfm_net.load_state_dict(torch.load(sfm_path))
-            calib_net.eval()
-            sfm_net.eval()
-            trainfc(calib_net)
-            trainfc(sfm_net)
-
-            opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-            opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
-            curloss = 100
-            for outerloop in itertools.count():
-                shape = shape.detach()
-                for iter in itertools.count():
-                    opt1.zero_grad()
-                    f = calib_net(x)+300
-                    K = torch.zeros(3,3).float()
-                    K[0,0] = f
-                    K[1,1] = f
-                    K[2,2] = 1
-
-                    f_error = torch.mean(torch.abs(f - fgt))
-                    #rmse = torch.norm(shape_gt - shape,dim=1).mean()
-
-                    # differentiable PnP pose estimation
-                    km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-                    Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                    error_time = util.getTimeConsistency(shape,R,T)
-
-                    loss = error2d.mean() + 0.001*error_time
-                    if iter == 5: break
-                    loss.backward()
-                    opt1.step()
-                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                # sfm
-                f = f.detach()
-                for iter in itertools.count():
-                    opt2.zero_grad()
-
-                    # shape prediction
-                    betas = sfm_net(x)
-                    shape = torch.sum(betas * lm_eigenvec,1)
-                    shape = shape.reshape(68,3) + mu_lm
-                    K = torch.zeros((3,3)).float()
-                    K[0,0] = f
-                    K[1,1] = f
-                    K[2,2] = 1
-
-                    # differentiable PnP pose estimation
-                    km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-                    Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                    error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                    error_time = util.getTimeConsistency(shape,R,T)
-                    #loss = rmse
-
-                    loss = error2d.mean() + 0.001*error_time
-                    if iter == 5: break
-                    loss.backward()
-                    opt2.step()
-                    print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                # closing condition for outerloop on dual objective
-                if torch.abs(curloss - loss) < 0.01: break
-                curloss = loss
+            shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
+            f = K[0,0]
 
         # get final result to save
         K = torch.zeros(3,3).float()
@@ -422,71 +509,8 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
 
             # apply dual optimization
             if optimize:
-                calib_net.load_state_dict(torch.load(calib_path))
-                sfm_net.load_state_dict(torch.load(sfm_path))
-                calib_net.eval()
-                sfm_net.eval()
-                trainfc(calib_net)
-                trainfc(sfm_net)
-
-                opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-                opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
-                curloss = 100
-                for outerloop in itertools.count():
-                    shape = shape.detach()
-                    for iter in itertools.count():
-                        opt1.zero_grad()
-                        f = calib_net(x)+300
-                        K = torch.zeros(3,3).float()
-                        K[0,0] = f
-                        K[1,1] = f
-                        K[2,2] = 1
-
-                        f_error = torch.mean(torch.abs(f - fgt))
-                        #rmse = torch.norm(shape_gt - shape,dim=1).mean()
-
-                        # differentiable PnP pose estimation
-                        km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                        error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                        error_time = util.getTimeConsistency(shape,R,T)
-
-                        loss = error2d.mean() + 0.001*error_time
-                        if iter == 5: break
-                        loss.backward()
-                        opt1.step()
-                        print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                    # sfm
-                    f = f.detach()
-                    for iter in itertools.count():
-                        opt2.zero_grad()
-
-                        # shape prediction
-                        betas = sfm_net(x)
-                        shape = torch.sum(betas * lm_eigenvec,1)
-                        shape = shape.reshape(68,3) + mu_lm
-                        K = torch.zeros((3,3)).float()
-                        K[0,0] = f
-                        K[1,1] = f
-                        K[2,2] = 1
-
-                        # differentiable PnP pose estimation
-                        km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-                        Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-                        error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-                        error_time = util.getTimeConsistency(shape,R,T)
-                        #loss = rmse
-
-                        loss = error2d.mean() + 0.001*error_time
-                        if iter == 5: break
-                        loss.backward()
-                        opt2.step()
-                        print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
-
-                    # closing condition for outerloop on dual objective
-                    if torch.abs(curloss - loss) < 0.01: break
-                    curloss = loss
+                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt)
+                f = K[0,0]
             else:
                 K = torch.zeros(3,3).float()
                 K[0,0] = f
@@ -494,7 +518,6 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
                 K[2,2] = 1
                 km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
                 Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-
 
             # get errors
             reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K,show=False)
@@ -570,13 +593,13 @@ if __name__ == '__main__':
 
     if args.db == 'syn':
         test()
-    elif args.db == 'syn_bn':
-        test_bn()
+    elif args.db == 'cad120':
+        testCad120()
     elif args.db == 'biwi':
-        testReal()
+        testBIWI()
     elif args.db == 'biwiid':
         testBIWIID()
     else:
-        testReal()
+        test()
 
 
