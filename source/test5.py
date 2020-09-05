@@ -185,7 +185,7 @@ def testCad120(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(calib_net)
             trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
-            f = K[0,0]
+            f = K[0,0].detach()
         else:
             K = torch.zeros(3,3).float()
             K[0,0] = f
@@ -286,7 +286,7 @@ def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(calib_net)
             trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
-            f = K[0,0]
+            f = K[0,0].detach()
         else:
             K = torch.zeros(3,3).float()
             K[0,0] = f
@@ -389,7 +389,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
             trainfc(sfm_net)
 
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
-            f = K[0,0]
+            f = K[0,0].detach()
 
         # get final result to save
         K = torch.zeros(3,3).float()
@@ -417,7 +417,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         error_rel3d.append(rel_error.cpu().data.item())
         error_relf.append(f_error.cpu().data.item())
 
-        print(f" f/fgt: {f[0].item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+        print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
 
     # prepare output file
     matdata = {}
@@ -510,7 +510,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
             # apply dual optimization
             if optimize:
                 shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt)
-                f = K[0,0]
+                f = K[0,0].detach()
             else:
                 K = torch.zeros(3,3).float()
                 K[0,0] = f
@@ -533,7 +533,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
             f_pred.append(f.detach().cpu().item())
             shape_pred.append(shape.detach().cpu().numpy())
 
-            all_fpred.append(f.detach().numpy()[0])
+            all_fpred.append(f.detach().data.numpy())
             allerror_3d.append(reproj_error.data.numpy())
             allerror_2d.append(reconstruction_error.data.numpy())
             allerror_rel3d.append(rel_error.data.numpy())
@@ -542,7 +542,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
             error_rel3d.append(rel_error.cpu().data.item())
             error_relf.append(f_error.cpu().data.item())
 
-            print(f"f/sequence: {f_test}/{j}  | f/fgt: {f[0].item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+            print(f"f/sequence: {f_test}/{j}  | f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
 
         avg_2d = np.mean(error_2d)
         avg_rel3d = np.mean(error_rel3d)
