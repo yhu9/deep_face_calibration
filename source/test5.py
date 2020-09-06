@@ -49,7 +49,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
     shape = shape - shape.mean(0).unsqueeze(0)
 
     opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-1)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
     curloss = 100
     for outerloop in itertools.count():
         shape = shape.detach()
