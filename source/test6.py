@@ -7,7 +7,7 @@ import scipy.io
 import torch
 import numpy as np
 
-from model2 import PointNet
+from model3 import PointNet
 import dataloader
 import util
 
@@ -40,12 +40,6 @@ def trainfc(model):
 # dual optimization to optimize focal length and 3D shape
 def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
 
-    # define what weights gets optimized
-    calib_net.eval()
-    sfm_net.eval()
-    trainfc(calib_net)
-    trainfc(sfm_net)
-
     ptsI = x.squeeze().permute(1,0).reshape((M,N,2)).permute(0,2,1)
     # run the model
     f = calib_net(x) + 300
@@ -70,7 +64,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             # pose estimation
             km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
             Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
             error_time = util.getTimeConsistency(shape,R,T)
 
             # apply loss
@@ -108,7 +102,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             # differentiable PnP pose estimation
             km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
             Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
             error_time = util.getTimeConsistency(shape,R,T)
 
             # apply loss
@@ -185,6 +179,10 @@ def testHuman36(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -280,6 +278,10 @@ def testCad120(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -377,6 +379,10 @@ def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -475,6 +481,10 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
+            calib_net.eval()
+            sfm_net.eval()
+            trainfc(calib_net)
+            trainfc(sfm_net)
 
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
@@ -674,6 +684,8 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
     print(f"MEAN seterror_3d: {np.mean(seterror_3d)}")
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
+
+    return np.mean(seterror_relf)
 
 
 ####################################################################################3

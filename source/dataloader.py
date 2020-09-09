@@ -201,6 +201,46 @@ class Cad120Loader(Dataset):
 
         return sample
 
+
+class Human36Loader(Dataset):
+    def __init__(self):
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/human36/processed")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/human36/processed")
+        files = os.listdir(self.root_dir)
+        files.sort()
+
+        self.all_paths = [os.path.join(self.root_dir,f) for f in files]
+
+    def __len__(self):
+
+        return len(self.all_paths)
+
+    def __getitem__(self,idx):
+        path = self.all_paths[idx]
+        print(f"load: {path}")
+        data = scipy.io.loadmat(path)
+
+        x2d = data['x2d']
+        xcam = data['xcam']
+        f = data['fgt'][0,0]
+        M = x2d.shape[0]
+        N = x2d.shape[1]
+
+        pts = x2d.reshape((M*N,2))
+        x2d = np.transpose(x2d,(0,2,1))
+        xcam = np.transpose(xcam,(0,2,1))
+
+        sample = {}
+        sample['x_img_gt'] = torch.from_numpy(x2d).float()
+        sample['x_img'] = torch.from_numpy(pts).float()
+        sample['x_cam_gt'] = torch.from_numpy(xcam).float()
+        sample['f_gt'] = torch.from_numpy(np.array([f]).astype(np.float)).float()
+
+        return sample
+
+
 class BIWIIDLoader(Dataset):
 
     def __init__(self):
@@ -817,19 +857,16 @@ class SyntheticLoader(Dataset):
         shape_data = scipy.io.loadmat(root_dir)
         mu_lm = shape_data['mu_lm']
         mu_exp = shape_data['mu_exp']
-        lm_eigenvec = shape_data['lm_eigenvec']
+        self.lm_eigenvec = shape_data['lm_eigenvec']
         exp_eigenvec = shape_data['exp_eigenvec']
-        self.sigma = shape_data['sigma']
+        self.sigma = shape_data['sigma'] / 100
 
         self.mu_lm = mu_lm.T
         self.mu_lm = self.mu_lm - np.mean(self.mu_lm,0)
-        #self.mu_lm = self.mu_lm / np.max(np.abs(self.mu_lm))
 
         self.mu_exp= mu_exp.T
         self.mu_exp= self.mu_exp - np.mean(self.mu_exp,0)
-        #self.mu_exp= self.mu_exp / torch.max(torch.abs(self.mu_exp))
 
-        self.lm_eigenvec = lm_eigenvec
         self.exp_eigenvec = exp_eigenvec
 
         # video sequence length
@@ -862,11 +899,13 @@ class SyntheticLoader(Dataset):
         K = np.array([[f,0,0],[ 0,f,0], [0,0,1]])
 
         # create random 3dmm shape
-        alpha = np.random.randn(199)*5
-        s = np.sum( np.expand_dims(alpha,0) * self.lm_eigenvec,1)
+        alpha = np.random.randn(199,1) * 100
+        lm_eigenvec = np.matmul(self.lm_eigenvec,np.diag(self.sigma[:,0]))
+        s = np.squeeze(np.matmul(lm_eigenvec,alpha))
         s = s.reshape(68,3)
         lm = self.mu_lm + s
-        #lm[:,2] = lm[:,2] * -1
+        lm = lm - np.expand_dims(np.mean(lm,axis=0),axis=0)
+
         x_w = lm
 
         #import pptk
