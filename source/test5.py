@@ -475,7 +475,6 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
-
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
 
@@ -597,6 +596,8 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
 
             # apply dual optimization
             if optimize:
+                calib_net.load_state_dict(torch.load(calib_path))
+                sfm_net.load_state_dict(torch.load(sfm_path))
                 shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt)
                 f = K[0,0].detach()
             else:
@@ -674,6 +675,8 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
     print(f"MEAN seterror_3d: {np.mean(seterror_3d)}")
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
+
+    return np.mean(seterror_relf)
 
 
 ####################################################################################3

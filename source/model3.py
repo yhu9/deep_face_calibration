@@ -64,8 +64,6 @@ class STNkd(nn.Module):
 
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
         x = self.fc3(x)
 
         iden = Variable(torch.from_numpy(np.eye(self.k).flatten().astype(np.float32))).view(1,self.k*self.k).repeat(batchsize,1)

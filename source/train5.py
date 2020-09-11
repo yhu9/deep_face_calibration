@@ -46,8 +46,8 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
 
     calib_net.to(device=device)
     sfm_net.to(device=device)
-    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-3)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-3)
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
 
     # dataloader
     data = dataloader.Data()
@@ -66,6 +66,7 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
     N = data.N
 
     # main training loop
+    best = 10000
     for epoch in itertools.count():
         for j,batch in enumerate(loader):
 
@@ -111,17 +112,20 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                 opt1.step()
                 opt2.step()
 
-                print(f"f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
+                print(f"{best:.2f} | f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} | f/fgt: {f[0].item():.1f}/{fgt[0].item():.1f} | f/fgt: {f[1].item():.1f}/{fgt[1].item():.1f} | f/fgt: {f[2].item():.1f}/{fgt[2].item():.1f} | f/fgt: {f[3].item():.1f}/{fgt[3].item():.1f} ")
                 continue
 
-            # get shape error from image projection
-            print(f"f/fgt: {f[0].item():.3f}/{fgt[0].item():.3f} | rmse: {rmse:.3f} | f_rel: {f_error.item():.4f}  | loss1: {loss1.item():.3f} | loss2: {loss2.item():.3f}")
-
         # save model and increment weight decay
-        print("saving!")
-        torch.save(sfm_net.state_dict(), os.path.join('model','sfm_'+modelout))
-        torch.save(calib_net.state_dict(), os.path.join('model','calib_'+modelout))
-        test(modelin=args.out,outfile=args.out,optimize=False)
+        torch.save(sfm_net.state_dict(), os.path.join('model','sfm_model.pt'))
+        torch.save(calib_net.state_dict(), os.path.join('model','calib_model.pt'))
+        ferror = test(modelin='model.pt',outfile=args.out,optimize=False)
+        if ferror < best:
+            best = ferror
+            print("saving!")
+            torch.save(sfm_net.state_dict(), os.path.join('model','sfm_'+modelout))
+            torch.save(calib_net.state_dict(), os.path.join('model','calib_'+modelout))
+        sfm_net.train()
+        calib_net.train()
         #decay.step()
 
 

@@ -19,10 +19,14 @@ parser.add_argument("--out",default="results/exp.mat")
 parser.add_argument("--device",default='cpu')
 parser.add_argument("--opt", default=False, action='store_true')
 parser.add_argument("--db", default="syn")
+parser.add_argument("--ft",default=False, action="store_true")
 args = parser.parse_args()
 
 np.random.seed(0)
-#########################################################
+torch.manual_seed(0)
+##############################################################################################
+##############################################################################################
+##############################################################################################
 
 data3dmm = dataloader.SyntheticLoader()
 mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
@@ -32,13 +36,37 @@ sigma = torch.from_numpy(data3dmm.sigma).float().detach()
 sigma = torch.diag(sigma.squeeze())
 lm_eigenvec = torch.mm(lm_eigenvec, sigma)
 
+# HELPER FUNCTIONS
 def trainfc(model):
     for name, param in model.named_parameters():
         if 'fc' in name and 'feat' not in name:
             param.requires_grad = True
 
+def getLoader(db):
+    if db == 'syn':
+        loader = dataloader.TestLoader(f_test)
+    elif db == 'human36':
+        loader = dataloader.Human36Loader()
+    elif db == 'cad120':
+        loader = dataloader.Cad120Loader()
+    elif db == 'biwi':
+        loader = dataloader.BIWILoader()
+    elif db == 'biwiid':
+        loader = dataloader.BIWIIDLoader()
+    return loader
+
+##############################################################################################
+##############################################################################################
+##############################################################################################
+
 # dual optimization to optimize focal length and 3D shape
 def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
+
+    # define what weights gets optimized
+    calib_net.eval()
+    sfm_net.eval()
+    trainfc(calib_net)
+    trainfc(sfm_net)
 
     ptsI = x.squeeze().permute(1,0).reshape((M,N,2)).permute(0,2,1)
     # run the model
@@ -49,42 +77,9 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
     shape = shape - shape.mean(0).unsqueeze(0)
 
     opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-2)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=10)
     curloss = 100
     for outerloop in itertools.count():
-        shape = shape.detach()
-        for iter in itertools.count():
-            opt1.zero_grad()
-            f = calib_net(x) + 300
-            K = torch.zeros(3,3).float()
-            K[0,0] = f
-            K[1,1] = f
-            K[2,2] = 1
-
-            # pose estimation
-            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-            error_time = util.getTimeConsistency(shape,R,T)
-
-            # apply loss
-            loss = error2d.mean() + 0.01*error_time
-            if iter == 5: break
-            loss.backward()
-            opt1.step()
-
-            # log results on console
-            if not shape_gt is None:
-                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
-            else:
-                rmse = -1
-            if not fgt is None:
-                ftrue = fgt.item()
-            else:
-                fgt = -1
-            f_error = torch.mean(torch.abs(f-ftrue))
-            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
-
         f = f.detach()
         for iter in itertools.count():
             opt2.zero_grad()
@@ -107,9 +102,10 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
 
             # apply loss
             loss = error2d.mean() + 0.01*error_time
-            if iter == 5: break
+            if iter >= 5 and loss > prv_loss: break
             loss.backward()
             opt2.step()
+            prv_loss = loss.item()
 
             # log results on console
             if not shape_gt is None:
@@ -123,11 +119,145 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
 
-        if torch.abs(curloss  - loss) < 0.01: break
+        shape = shape.detach()
+        for iter in itertools.count():
+            opt1.zero_grad()
+            f = calib_net(x) + 300
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+
+            # pose estimation
+            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+            error_time = util.getTimeConsistency(shape,R,T)
+
+            # apply loss
+            loss = error2d.mean()
+            if iter >= 5 and loss > prv_loss: break
+            prv_loss = loss.item()
+            loss.backward()
+            opt1.step()
+
+            # log results on console
+            if not shape_gt is None:
+                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+            else:
+                rmse = -1
+            if not fgt is None:
+                ftrue = fgt.item()
+            else:
+                fgt = -1
+            f_error = torch.mean(torch.abs(f-ftrue))
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
+
+
+        if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
         curloss = loss
     return shape,K,R,T
 
-######################################################################################
+##############################################################################################
+##############################################################################################
+##############################################################################################
+# testing on different datasets
+def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
+    # define model, dataloader, 3dmm eigenvectors, optimization method
+    calib_net = PointNet(n=1)
+    sfm_net = PointNet(n=199)
+    if modelin != "":
+        calib_path = os.path.join('model','calib_' + modelin)
+        sfm_path = os.path.join('model','sfm_' + modelin)
+        calib_net.load_state_dict(torch.load(calib_path))
+        sfm_net.load_state_dict(torch.load(sfm_path))
+    calib_net.eval()
+    sfm_net.eval()
+
+    # mean shape and eigenvectors for 3dmm
+    data3dmm = dataloader.SyntheticLoader()
+    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
+    mu_lm[:,2] = mu_lm[:,2]*-1
+    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
+    sigma = torch.from_numpy(data3dmm.sigma).float().detach()
+    sigma = torch.diag(sigma.squeeze())
+    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
+
+    # define loader
+    loader = getLoader(db)
+    f_pred = []
+    shape_pred = []
+    error_2d = []
+    error_relf = []
+    error_rel3d = []
+    for sub in range(len(loader)):
+        batch = loader[sub]
+        x_cam_gt = batch['x_cam_gt']
+        fgt = batch['f_gt']
+        x_img = batch['x_img']
+        x_img_gt = batch['x_img_gt']
+        M = x_img_gt.shape[0]
+        N = 68
+
+        ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
+        x = x_img.unsqueeze(0).permute(0,2,1)
+
+        # run the model
+        f = calib_net(x) + 300
+        betas = sfm_net(x)
+        betas = betas.squeeze(0).unsqueeze(-1)
+        shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+
+        # additional optimization on initial solution
+        if optimize:
+            calib_net.load_state_dict(torch.load(calib_path))
+            sfm_net.load_state_dict(torch.load(sfm_path))
+            shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
+            f = K[0,0].detach()
+        else:
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+            Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+
+        # get errors
+        reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
+        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
+
+        reproj_error = reproj_errors2.mean()
+        rel_error = rel_errors.mean()
+        f_error = torch.abs(fgt - f) / fgt
+
+        # save final prediction
+        f_pred.append(f.detach().cpu().item())
+        shape_pred.append(shape.detach().cpu().numpy())
+
+        error_2d.append(reproj_error.cpu().data.item())
+        error_rel3d.append(rel_error.cpu().data.item())
+        error_relf.append(f_error.cpu().data.item())
+
+        print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+        #end for
+
+    # prepare output file
+    out_shape = np.stack(shape_pred)
+    out_f = np.stack(f_pred)
+
+    matdata = {}
+    matdata['shape'] = np.stack(out_shape)
+    matdata['f'] = np.stack(out_f)
+    matdata['error_2d'] = np.array(error_2d)
+    matdata['error_rel3d'] = np.array(error_rel3d)
+    matdata['error_relf'] = np.array(error_relf)
+    scipy.io.savemat(outfile,matdata)
+
+    print(f"MEAN seterror_2d: {np.mean(error_2d)}")
+    print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
+    print(f"MEAN seterror_relf: {np.mean(error_relf)}")
+
+
 # testing on different datasets
 def testHuman36(modelin=args.model,outfile=args.out,optimize=args.opt):
     # define model, dataloader, 3dmm eigenvectors, optimization method
@@ -179,10 +309,6 @@ def testHuman36(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
-            calib_net.eval()
-            sfm_net.eval()
-            trainfc(calib_net)
-            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -278,10 +404,6 @@ def testCad120(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
-            calib_net.eval()
-            sfm_net.eval()
-            trainfc(calib_net)
-            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -379,10 +501,6 @@ def testBIWI(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
-            calib_net.eval()
-            sfm_net.eval()
-            trainfc(calib_net)
-            trainfc(sfm_net)
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
         else:
@@ -481,11 +599,6 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
-            calib_net.eval()
-            sfm_net.eval()
-            trainfc(calib_net)
-            trainfc(sfm_net)
-
             shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N)
             f = K[0,0].detach()
 
@@ -531,10 +644,10 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
     print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(error_relf)}")
 
-def test(modelin=args.model,outfile=args.out,optimize=args.opt):
+def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    calib_net = PointNet(n=1)
-    sfm_net = PointNet(n=199)
+    calib_net = PointNet(n=1,feature_transform=ft)
+    sfm_net = PointNet(n=199,feature_transform=ft)
     if modelin != "":
         calib_path = os.path.join('model','calib_' + modelin)
         sfm_path = os.path.join('model','sfm_' + modelin)
@@ -569,8 +682,12 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
     seterror_2d = []
     f_vals = [i*100 for i in range(4,15)]
 
+    # set random seed for reproducibility of test set
+    np.random.seed(0)
+    torch.manual_seed(0)
     for f_test in f_vals:
         # create dataloader
+        loader = dataloader.TestLoader(f_test)
 
         f_pred = []
         shape_pred = []
@@ -582,7 +699,6 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
         N = 68;
         batch_size = 1;
 
-        loader = dataloader.TestLoader(f_test)
         for j,data in enumerate(loader):
             if j == 10: break
             # load the data
@@ -604,9 +720,12 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt):
             betas = sfm_net(x)
             betas = betas.squeeze(0).unsqueeze(-1)
             shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+            shape = shape - shape.mean(0).unsqueeze(0)
 
             # apply dual optimization
             if optimize:
+                calib_net.load_state_dict(torch.load(calib_path))
+                sfm_net.load_state_dict(torch.load(sfm_path))
                 shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt)
                 f = K[0,0].detach()
             else:
@@ -693,15 +812,6 @@ if __name__ == '__main__':
 
     if args.db == 'syn':
         test()
-    elif args.db == 'human36':
-        testHuman36()
-    elif args.db == 'cad120':
-        testCad120()
-    elif args.db == 'biwi':
-        testBIWI()
-    elif args.db == 'biwiid':
-        testBIWIID()
     else:
-        test()
-
+        testReal()
 

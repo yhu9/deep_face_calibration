@@ -18,16 +18,17 @@ parser.add_argument("--out", default="model.pt")
 parser.add_argument("--model", default="")
 parser.add_argument("--device",default='cpu')
 parser.add_argument("--opt",default=False, action="store_true")
+parser.add_argument("--ft",default=False, action="store_true")
 args = parser.parse_args()
 
 ####################################################
 
 
-def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt):
+def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt,ft=args.ft):
 
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    calib_net = PointNet(n=1)
-    sfm_net = PointNet(n=199)
+    calib_net = PointNet(n=1,feature_transform=ft)
+    sfm_net = PointNet(n=199,feature_transform=ft)
     if modelin != "":
         calib_path = os.path.join('model','calib_' + modelin)
         sfm_path = os.path.join('model','sfm_' + modelin)
@@ -130,12 +131,16 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt)
                 continue
 
         # save model and increment weight decay
-        ferror = test(modelin=args.out,outfile=args.out,optimize=False)
+        torch.save(sfm_net.state_dict(), os.path.join('model','sfm_model.pt'))
+        torch.save(calib_net.state_dict(), os.path.join('model','calib_model.pt'))
+        ferror = test(modelin='model.pt',outfile=args.out,optimize=False)
         if ferror < best:
             best = ferror
             print("saving!")
             torch.save(sfm_net.state_dict(), os.path.join('model','sfm_'+modelout))
             torch.save(calib_net.state_dict(), os.path.join('model','calib_'+modelout))
+        sfm_net.train()
+        calib_net.train()
         #decay.step()
 
 
