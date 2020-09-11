@@ -94,7 +94,6 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
                 fgt = -1
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
-            break
 
         shape = shape.detach()
         for iter in itertools.count():
@@ -128,10 +127,8 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
                 fgt = -1
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
-            break
 
         if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
-        break
         curloss = loss
 
     km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
@@ -227,7 +224,6 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         error_relf.append(f_error.cpu().data.item())
 
         print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-        break
 
     # prepare output file
     matdata = {}
@@ -318,7 +314,6 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
         error_relf.append(f_error.cpu().data.item())
 
         print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-        break
 
     # prepare output file
     matdata = {}
