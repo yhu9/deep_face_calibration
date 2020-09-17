@@ -35,6 +35,7 @@ lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
 sigma = torch.from_numpy(data3dmm.sigma).float().detach()
 sigma = torch.diag(sigma.squeeze())
 lm_eigenvec = torch.mm(lm_eigenvec, sigma)
+ptstart=0
 
 # HELPER FUNCTIONS
 def trainfc(model):
@@ -69,12 +70,14 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
     trainfc(sfm_net)
 
     ptsI = x.squeeze().permute(1,0).reshape((M,N,2)).permute(0,2,1)
+    ptsI = ptsI[:,:,ptstart:]
     # run the model
     f = calib_net(x) + 300
     betas = sfm_net(x)
     betas = betas.squeeze(0).unsqueeze(-1)
     shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
     shape = shape - shape.mean(0).unsqueeze(0)
+    shape = shape[ptstart:,:]
 
     opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=10)
@@ -89,6 +92,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             shape = torch.sum(betas * lm_eigenvec,1)
             shape = shape.reshape(68,3) + mu_lm
             shape = shape - shape.mean(0).unsqueeze(0)
+            shape = shape[ptstart:,:]
             K = torch.zeros((3,3)).float()
             K[0,0] = f
             K[1,1] = f
@@ -103,6 +107,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             # apply loss
             loss = error2d.mean() + 0.01*error_time
             if iter >= 5 and loss > prv_loss: break
+            #if iter >= 5: break
             loss.backward()
             opt2.step()
             prv_loss = loss.item()
@@ -132,11 +137,13 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
             Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
             error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+            shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
             error_time = util.getTimeConsistency(shape,R,T)
 
             # apply loss
-            loss = error2d.mean()
+            loss = error2d.mean() + 0.01*error_time
             if iter >= 5 and loss > prv_loss: break
+            #if iter >= 5: break
             prv_loss = loss.item()
             loss.backward()
             opt1.step()
@@ -152,7 +159,6 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
                 fgt = -1
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
-
 
         if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
         curloss = loss
@@ -192,21 +198,24 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
     error_rel3d = []
     for sub in range(len(loader)):
         batch = loader[sub]
-        x_cam_gt = batch['x_cam_gt']
+        x_cam_gt = batch['x_cam_gt'][:,:,ptstart:]
         fgt = batch['f_gt']
         x_img = batch['x_img']
         x_img_gt = batch['x_img_gt']
+
         M = x_img_gt.shape[0]
-        N = 68
+        N = x_img_gt.shape[-1]
 
         ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
         x = x_img.unsqueeze(0).permute(0,2,1)
+        ptsI = ptsI[:,:,ptstart:]
 
         # run the model
         f = calib_net(x) + 300
         betas = sfm_net(x)
         betas = betas.squeeze(0).unsqueeze(-1)
         shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
+        shape = shape[ptstart:,:]
 
         # additional optimization on initial solution
         if optimize:

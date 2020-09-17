@@ -167,8 +167,10 @@ class Cad120Loader(Dataset):
     def __init__(self):
         if os.path.isdir("../data"):
             self.root_dir = os.path.join("../data/tmp/cad120/processed")
+            shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         else:
             self.root_dir = os.path.join("../data0/tmp/cad120/processed")
+            shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         files = os.listdir(self.root_dir)
         files.sort()
 
@@ -284,12 +286,15 @@ class BIWILoader(Dataset):
     def __init__(self):
         if os.path.isdir("../data"):
             self.root_dir = os.path.join("../data/tmp/biwi/processed")
+            self.shape_dir = os.path.join("../data/tmp/biwi/shape")
         else:
             self.root_dir = os.path.join("../data0/tmp/biwi/processed")
+            self.shape_dir = os.path.join("../data0/tmp/biwi/shape")
         files = os.listdir(self.root_dir)
         files.sort()
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
+        self.maxangle = 20
         return
 
     def __len__(self):
@@ -301,60 +306,11 @@ class BIWILoader(Dataset):
         print(f"load: {path}")
         data = scipy.io.loadmat(path)
 
-        x2d = data['x2d']
-        xcam = data['xcam']
-        f = data['fgt'][0,0]
-        M = x2d.shape[0]
-        N = x2d.shape[1]
+        shape_path = os.path.join(self.shape_dir,f"{idx+1:02d}_shape.mat")
+        shape_data = scipy.io.loadmat(shape_path)
 
-        pts = x2d.reshape((M*N,2))
-        x2d = np.transpose(x2d,(0,2,1))
-        xcam = np.transpose(xcam,(0,2,1))
-
-        sample = {}
-        sample['x_img_gt'] = torch.from_numpy(x2d).float()
-        sample['x_img'] = torch.from_numpy(pts).float()
-        sample['x_cam_gt'] = torch.from_numpy(xcam).float()
-        sample['f_gt'] = torch.from_numpy(np.array([f]).astype(np.float)).float()
-
-        return sample
-
-class AblationLoader(Dataset):
-
-    def __init__(self):
-        if os.path.isdir("../data"):
-            self.root_dir = os.path.join("../data/tmp/biwi/processed")
-            shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
-        else:
-            self.root_dir = os.path.join("../data0/tmp/biwi/processed")
-            shape_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
-        subjects = [f"{sub:02d}" for sub in range(1,25)]
-
-        shape_data = scipy.io.loadmat(shape_dir)
-        mu_lm = shape_data['mu_lm']
-        mu_exp = shape_data['mu_exp']
-        lm_eigenvec = shape_data['lm_eigenvec']
-        exp_eigenvec = shape_data['exp_eigenvec']
-
-        self.mu_lm = mu_lm.T
-        self.mu_lm = self.mu_lm - np.mean(self.mu_lm,0)
-        self.mu_exp = mu_exp.T
-        self.mu_exp = self.mu_exp - np.mean(self.mu_exp,0)
-
-        self.lm_eigenvec = lm_eigenvec
-        self.exp_eigenvec = exp_eigenvec
-
-        self.maxangle = 20
-
-    def __len__(self):
-        return 24
-
-    def __getitem__(self,idx):
-        idx = idx+1
-        file = f"{idx:02d}_sequence.mat"
-        full_path = os.path.join(self.root_dir,file)
-        data = scipy.io.loadmat(full_path)
-
+        x_w = shape_data['mean_lm']
+        x_w[:,2] = x_w[:,2] * -1
         x2d = data['x2d']
         xcam = data['xcam']
         f = data['fgt'][0,0]
@@ -381,6 +337,87 @@ class AblationLoader(Dataset):
         xcam = np.transpose(xcam,(0,2,1))
 
         sample = {}
+        sample['x_w_gt'] = torch.from_numpy(x_w).float()
+        sample['x_img_gt'] = torch.from_numpy(x2d).float()
+        sample['x_img'] = torch.from_numpy(pts).float()
+        sample['x_cam_gt'] = torch.from_numpy(xcam).float()
+        sample['f_gt'] = torch.from_numpy(np.array([f]).astype(np.float)).float()
+
+        return sample
+
+class AnalysisLoader(Dataset):
+    def __init__(self):
+        if os.path.isdir("../data"):
+            self.root_dir = os.path.join("../data/tmp/biwi/processed")
+            shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+            self.shape_dir = os.path.join("../data/tmp/biwi/shape")
+        else:
+            self.root_dir = os.path.join("../data0/tmp/biwi/processed")
+            shape_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+            self.shape_dir = os.path.join("../data0/tmp/biwi/shape")
+        subjects = [f"{sub:02d}" for sub in range(1,25)]
+
+        files = os.listdir(self.root_dir)
+        files.sort()
+        self.all_paths = [os.path.join(self.root_dir,f) for f in files]
+
+        shape_data = scipy.io.loadmat(shape_dir)
+        mu_lm = shape_data['mu_lm']
+        mu_exp = shape_data['mu_exp']
+        lm_eigenvec = shape_data['lm_eigenvec']
+        exp_eigenvec = shape_data['exp_eigenvec']
+
+        self.mu_lm = mu_lm.T
+        self.mu_lm = self.mu_lm - np.mean(self.mu_lm,0)
+        self.mu_exp = mu_exp.T
+        self.mu_exp = self.mu_exp - np.mean(self.mu_exp,0)
+
+        self.lm_eigenvec = lm_eigenvec
+        self.exp_eigenvec = exp_eigenvec
+
+        self.minangle = 20
+        self.maxangle = 20
+
+    def __len__(self):
+        return 24
+
+    def __getitem__(self,idx):
+        path = self.all_paths[idx]
+        print(f"load: {path}")
+        data = scipy.io.loadmat(path)
+
+        shape_path = os.path.join(self.shape_dir,f"{idx+1:02d}_shape.mat")
+        shape_data = scipy.io.loadmat(shape_path)
+
+        x_w = shape_data['mean_lm']
+        x_w[:,2] = x_w[:,2] * -1
+        x2d = data['x2d']
+        xcam = data['xcam']
+        f = data['fgt'][0,0]
+        R = data['R']
+        M = x2d.shape[0]
+        N = x2d.shape[1]
+
+        # find valid views
+        validview = []
+        for i in range(M):
+            r = Rotation.from_matrix(R[i])
+            angles = r.as_euler('zyx',degrees=False)
+            angles = np.arcsin(np.sin(angles)) * 180 / np.pi
+            if np.any(np.abs(angles) > self.maxangle): continue
+            else: validview.append(i)
+
+        x2d = x2d[validview]
+        xcam = xcam[validview]
+        M = x2d.shape[0]
+        N = x2d.shape[1]
+
+        pts = x2d.reshape((M*N,2))
+        x2d = np.transpose(x2d,(0,2,1))
+        xcam = np.transpose(xcam,(0,2,1))
+
+        sample = {}
+        sample['x_w_gt'] = torch.from_numpy(x_w).float()
         sample['x_img_gt'] = torch.from_numpy(x2d).float()
         sample['x_img'] = torch.from_numpy(pts).float()
         sample['x_cam_gt'] = torch.from_numpy(xcam).float()
@@ -453,7 +490,6 @@ class BIWILoader(Dataset):
         sample['f_gt'] = torch.Tensor(f).float()
 
         return sample
-'''
 
 class AnalysisLoader(Dataset):
     def __init__(self,M=100,N=68,f=1000):
@@ -651,6 +687,7 @@ class AnalysisLoader(Dataset):
         ximg = proj.T
 
         return ximg
+'''
 
 class SyntheticLoaderFull(Dataset):
     def __init__(self):

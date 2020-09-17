@@ -483,35 +483,74 @@ def getPCError(xcam,ximg,kinv,mode='l1'):
     else:
         return torch.nn.functional.mse_loss(xcam_pred[:,:2,:],xcam[:,:2,:])
 
+# get error in fundamental matrix
+#INPUT:
+#   pI ->   (M,2,N)
+#   f ->    (3,3)
+#   R ->    (M,3,3)
+#   T ->    (M,3)
+#OUTPUT:
+#
+def FundamentalError(pI,K,R,T):
+    M = pI.shape[0]
+    N = pI.shape[2]
+
+    tx = torch.zeros((M,3,3))
+    tx[:,0,1] = -T[:,2]
+    tx[:,0,2] = T[:,1]
+    tx[:,1,0] = T[:,2]
+    tx[:,1,2] = -T[:,0]
+    tx[:,2,0] = -T[:,1]
+    tx[:,2,1] = T[:,0]
+
+    kinv = torch.zeros((3,3))
+    kinv[0,0] = 1/K[0,0]
+    kinv[1,1] = 1/K[1,1]
+    kinv[2,2] = 1
+
+    E = torch.bmm(R,tx)
+    F = torch.bmm(torch.bmm(kinv,E),kinv)
+
+    return error
+
 #INPUT
-# pI        (b,M*N,3)
-# pW        (b,N,3)
-# pC        (b,3,M*N)
-# kinv      (b,3,3)
+# pI        (M,2,N)
+# pC        (M,3,N)
+# pW        (N,3)
+# f         (1)
+# R         (M,3,3)
+# T         (M,3)
 #OUTPUT
 # scalar
-def getShapeError(pI,pW,pC,kinv):
+def getShapeError(pI,pC,pW,f,R,T):
 
-    b = pI.shape[0]
-    N = pW.shape[1]
-    M = pI.shape[1] // N
+    M = pI.shape[0]
+    N = pI.shape[2]
+    kinv = torch.zeros((3,3))
+    kinv[0,0] = 1/f
+    kinv[1,1] = 1/f
+    kinv[2,2] = 1
+    kinv = torch.stack(M*[kinv])
 
-    pI_proj = torch.bmm(kinv,pI.permute(0,2,1))
+    pI = torch.cat((pI,torch.ones((M,1,N))),dim=1)
+    proj = torch.bmm(kinv,pI)
     z = pC[:,2,:].unsqueeze(1)
-    pC_proj = pI_proj * z
 
-    le_gt = torch.mean(pW[:,36:42,:],dim=1)
-    re_gt = torch.mean(pW[:,42:48,:],dim=1)
-    #d_gt = torch.sum(torch.pow(le_gt - re_gt,2),dim=1)
-    d_gt = torch.norm(le_gt - re_gt,dim=1)
-    proj = pC_proj.permute(0,2,1).reshape(b,M,N,3)
+    pC_proj = proj * z
+    pW_proj = torch.bmm(R.permute(0,2,1),pC_proj - T.unsqueeze(-1))
 
-    le = torch.mean(proj[:,:,36:42,:],dim=-2)
-    re = torch.mean(proj[:,:,42:48,:],dim=-2)
-    #d = torch.sum(torch.pow(le - re,2),dim=2)
-    d = torch.norm(le - re,dim=2)
+    pW = torch.stack(M*[pW.T])
 
-    error = torch.mean(torch.abs(d - d_gt.unsqueeze(1)))
+    m1 = torch.sign(pW_proj[:,0,0]) != torch.sign(pW[:,0,0])
+    m2 = torch.sign(pW_proj[:,1,8]) != torch.sign(pW[:,1,8])
+    m3 = torch.sign(pW_proj[:,2,33]) != torch.sign(pW[:,2,33])
+
+    pW_proj[m1,0,:] = pW_proj[m1,0,:] * -1
+    pW_proj[m2,1,:] = pW_proj[m2,1,:] * -1
+    pW_proj[m3,2,:] = pW_proj[m3,2,:] * -1
+
+    diff = pW_proj - pW
+    error = torch.mean(torch.norm(diff,dim=1))
 
     return error
 
@@ -1410,14 +1449,6 @@ def scatter3d(pts):
     v = pptk.viewer(pts.detach().cpu().numpy())
     v.set(point_size=0.2)
     return v
-
-# 3d shape error
-#INPUT:
-# s         (N,3)
-# s_gt      (N,3)
-def getShapeError(s,s_gt):
-    error = torch.mean(torch.norm(s - s_gt,dim=1))
-    return error
 
 # solve rotation translation
 
