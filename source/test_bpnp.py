@@ -50,7 +50,7 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
 
     opt1 = torch.optim.Adam({calib_net},lr=1e-1)
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-4)
-    curloss = 100
+    curloss = 10000
     for outerloop in itertools.count():
         f = f.detach()
         for iter in itertools.count():
