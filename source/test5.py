@@ -101,13 +101,14 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             # differentiable PnP pose estimation
             km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
             _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
             Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
             shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
             error_time = util.getTimeConsistency(shape,R,T)
 
             # apply loss
-            loss = error2d.mean()
+            #loss = error2d.mean()
+            loss = shape_error
             if iter >= 5 and loss > prv_loss: break
             #if iter >= 5: break
             loss.backward()
@@ -141,12 +142,13 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
             shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
             error_time = util.getTimeConsistency(shape,R,T)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l1')
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
 
             # apply loss
             #loss = error2d.mean() + 0.01*error_time
             #loss = error2d.mean() + 0.1*shape_error + 0.01*error_time
-            loss = shape_error + 0.01*error_time
+            #loss = error2d.mean() + 0.01*error_time
+            loss = shape_error
             if iter >= 5 and loss > prv_loss: break
             #if iter >= 5: break
             prv_loss = loss.item()
