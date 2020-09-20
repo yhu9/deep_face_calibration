@@ -35,7 +35,7 @@ lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
 sigma = torch.from_numpy(data3dmm.sigma).float().detach()
 sigma = torch.diag(sigma.squeeze())
 lm_eigenvec = torch.mm(lm_eigenvec, sigma)
-ptstart=0
+ptstart=17
 
 # HELPER FUNCTIONS
 def trainfc(model):
@@ -79,10 +79,50 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
     shape = shape - shape.mean(0).unsqueeze(0)
     shape = shape[ptstart:,:]
 
-    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-5)
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=10)
     curloss = 100
     for outerloop in itertools.count():
+        shape = shape.detach()
+        for iter in itertools.count():
+            opt1.zero_grad()
+            f = calib_net(x) + 300
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+
+            # pose estimation
+            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
+            _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+            Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
+            shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
+            error_time = util.getTimeConsistency(shape,R,T)
+            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+
+            # apply loss
+            #loss = error2d.mean() + 0.01*error_time
+            #loss = error2d.mean() + 0.1*shape_error + 0.01*error_time
+            #loss = error2d.mean() + 0.01*error_time
+            loss = error2d.mean() + 0.001*error_time
+            #if iter >= 5 and loss > prv_loss: break
+            if iter >= 5: break
+            prv_loss = loss.item()
+            loss.backward()
+            opt1.step()
+
+            # log results on console
+            if not shape_gt is None:
+                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+            else:
+                rmse = -1
+            if not fgt is None:
+                ftrue = fgt.item()
+            else:
+                fgt = -1
+            f_error = torch.mean(torch.abs(f-ftrue))
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | shape_error: {shape_error.item():.3f} | rmse: {rmse:.2f}")
+
         f = f.detach()
         for iter in itertools.count():
             opt2.zero_grad()
@@ -108,9 +148,9 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
 
             # apply loss
             #loss = error2d.mean()
-            loss = shape_error
-            if iter >= 5 and loss > prv_loss: break
-            #if iter >= 5: break
+            loss = error2d.mean() + 0.001*error_time
+            #if iter >= 5 and loss > prv_loss: break
+            if iter >= 5: break
             loss.backward()
             opt2.step()
             prv_loss = loss.item()
@@ -127,47 +167,8 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
 
-        shape = shape.detach()
-        for iter in itertools.count():
-            opt1.zero_grad()
-            f = calib_net(x) + 300
-            K = torch.zeros(3,3).float()
-            K[0,0] = f
-            K[1,1] = f
-            K[2,2] = 1
 
-            # pose estimation
-            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-            _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
-            shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
-            error_time = util.getTimeConsistency(shape,R,T)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-
-            # apply loss
-            #loss = error2d.mean() + 0.01*error_time
-            #loss = error2d.mean() + 0.1*shape_error + 0.01*error_time
-            #loss = error2d.mean() + 0.01*error_time
-            loss = shape_error
-            if iter >= 5 and loss > prv_loss: break
-            #if iter >= 5: break
-            prv_loss = loss.item()
-            loss.backward()
-            opt1.step()
-
-            # log results on console
-            if not shape_gt is None:
-                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
-            else:
-                rmse = -1
-            if not fgt is None:
-                ftrue = fgt.item()
-            else:
-                fgt = -1
-            f_error = torch.mean(torch.abs(f-ftrue))
-            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | rmse: {rmse:.2f}")
-
-        if torch.abs(curloss  - loss) <= 0.1 or curloss < loss: break
+        if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
         curloss = loss
     return shape,K,R,T
 

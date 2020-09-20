@@ -152,10 +152,7 @@ def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
 
                     loss = error2d.mean() + 0.01*error_time
                     if iter == 5: break
-                    if iter > 10 and prev_loss < loss:
-                        break
-                    else:
-                        prev_loss = loss
+                    prev_loss = loss.item()
                     loss.backward()
                     opt2.step()
                     print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{fgt[0].item():.1f} | error2d: {error2d.mean().item():.3f} ")
