@@ -491,33 +491,42 @@ class BIWILoader(Dataset):
 
         return sample
 
-class AnalysisLoader(Dataset):
+'''
+
+class MNLoader(Dataset):
     def __init__(self,M=100,N=68,f=1000):
 
         #self.transform = transforms.Compose([ToTensor()])
         if os.path.isdir("../data"):
-            root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
+            root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
+            #root_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
         else:
-            root_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape.mat"
+            root_dir = "../data0/face_alignment/300w_lp/code/modelgeneration/shape_simple.mat"
+            #root_dir = "../data0/face_alignment/300w_lp/code/modelgeneration/shape.mat"
         shape_data = scipy.io.loadmat(root_dir)
 
         # load shape data
-        self.mu_s = shape_data['mu_s'].T
-        self.mu_exp = shape_data['mu_e'].T
-        lm_eigenvec = shape_data['shape_eigenvec']
+        #self.mu_s = shape_data['mu_s'].T
+        #self.mu_exp = shape_data['mu_e'].T
+        #lm_eigenvec = shape_data['shape_eigenvec']
+        #exp_eigenvec = shape_data['exp_eigenvec']
+        #self.sigma = shape_data['sigma'] / 100
+        self.mu_s = shape_data['mu_lm'].T
+        self.mu_exp = shape_data['mu_exp'].T
+        lm_eigenvec = shape_data['lm_eigenvec']
         exp_eigenvec = shape_data['exp_eigenvec']
-        self.sigma = shape_data['sigma']
+        self.sigma = shape_data['sigma'] / 100
 
-        nmax = self.mu_s.shape[0]
-        idxlist = range(nmax)
-        indices = random.sample(idxlist,N)
+        if N > 68: N=68
 
-        lm_eigenvec = lm_eigenvec.reshape(53215,3,199)
-        exp_eigenvec = exp_eigenvec.reshape(53215,3,29)
-        self.lm_eigenvec = lm_eigenvec[indices].reshape(-1,199)
-        self.exp_eigenvec = exp_eigenvec[indices].reshape(-1,29)
-        self.mu_s = self.mu_s[indices]
-        self.mu_exp = self.mu_exp[indices]
+        #lm_eigenvec = lm_eigenvec.reshape(53215,3,199)
+        #exp_eigenvec = exp_eigenvec.reshape(53215,3,29)
+        lm_eigenvec = lm_eigenvec.reshape(68,3,199)
+        exp_eigenvec = exp_eigenvec.reshape(68,3,29)
+        self.lm_eigenvec = lm_eigenvec[:N].reshape(-1,199)
+        self.exp_eigenvec = exp_eigenvec[:N].reshape(-1,29)
+        self.mu_s = self.mu_s[:N]
+        self.mu_exp = self.mu_exp[:N]
 
         # bideo sequence length
         self.M = M
@@ -612,10 +621,8 @@ class AnalysisLoader(Dataset):
         proj = proj.transpose(0,2,1)
         x_img_true = proj[:,:,:2]
 
-        le = x_img_true[:,36,:]
-        re = x_img_true[:,45,:]
-        std = np.linalg.norm(le - re,axis=1)*0.05
-        noise = np.random.randn(M,N,2) * std.reshape(M,1,1)
+        # add noise to x_img_true
+        noise = np.random.randn(M,N,2) * 3
 
         x_img = x_img_true + noise
         x_img = x_img.reshape((M*N,2))
@@ -687,7 +694,6 @@ class AnalysisLoader(Dataset):
         ximg = proj.T
 
         return ximg
-'''
 
 class SyntheticLoaderFull(Dataset):
     def __init__(self):

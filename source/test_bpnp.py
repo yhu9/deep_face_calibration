@@ -1,6 +1,7 @@
 
 import itertools
 import argparse
+import os
 
 import scipy.io
 import torch
@@ -37,10 +38,32 @@ mu_lm = torch.from_numpy(data3dmm.mu_lm).float()
 mu_lm[:,2] = mu_lm[:,2] * -1
 le = torch.mean(mu_lm[36:42,:],axis=0)
 re = torch.mean(mu_lm[42:48,:],axis=0)
-ipd = torch.norm(le - re)
+ipd = torch.norm(le-re)
+
+def initializeSFM(sfm_net):
+    opt = torch.optim.Adam(sfm_net.parameters(),lr=1e-5)
+    for iter in itertools.count():
+
+        # shape prediction
+        shape = sfm_net(torch.ones(1,3,32,32)).view(68,3)
+        le = torch.mean(shape[36:42,:],axis=0)
+        re = torch.mean(shape[42:48,:],axis=0)
+        pred_ipd = torch.norm(le - re).detach()
+        shape = (ipd/pred_ipd) * shape
+        shape = shape - shape.mean(0).unsqueeze(0)
+
+        loss = torch.norm(shape - mu_lm,dim=-1).mean()
+        loss.backward()
+        opt.step()
+
+        if loss < 4.0: break
+        print(f"iter: {iter} | rmse: {loss.item():.3f} ")
+
+    torch.save(sfm_net.state_dict(), os.path.join('model','bpnp_sfm.net'))
+
+    return sfm_net
 
 # HELPER FUNCTIONS
-
 # dual optimization to optimize focal length and 3D shape
 def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68):
 
@@ -52,6 +75,39 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
     opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-4)
     curloss = 10000
     for outerloop in itertools.count():
+        shape = shape.detach()
+        for iter in itertools.count():
+            opt1.zero_grad()
+            f = torch.sigmoid(calib_net)*1400
+            K = torch.zeros(3,3).float()
+            K[0,0] = f
+            K[1,1] = f
+            K[2,2] = 1
+
+            # differentiable PnP pose estimation
+            pose = bpnp(x2d,shape,K,ini_pose)
+            pred = BPnP.batch_project(pose,shape,K)
+
+            # apply loss
+            loss = (torch.norm(pred - x2d,dim=-1)).mean()
+            if iter >= 5: break
+            prv_loss = loss.item()
+            loss.backward()
+            opt1.step()
+
+            # log results on console
+            if not shape_gt is None:
+                d,Z,tform = util.procrustes(shape.detach().numpy(),shape_gt.detach().numpy())
+                rmse = torch.norm(shape_gt - Z,dim=1).mean().detach()
+            else:
+                rmse = -1
+            if not fgt is None:
+                ftrue = fgt.item()
+            else:
+                fgt = -1
+            f_error = torch.mean(torch.abs(f-ftrue))
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
+
         f = f.detach()
         for iter in itertools.count():
             opt2.zero_grad()
@@ -63,7 +119,6 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
             pred_ipd = torch.norm(le - re).detach()
             shape = (ipd/pred_ipd) * shape
             shape = shape - shape.mean(0).unsqueeze(0)
-
 
             # focal length
             K = torch.zeros((3,3)).float()
@@ -77,7 +132,7 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
 
             # apply loss
             loss = (torch.norm(pred - x2d,dim=-1)).mean()
-            if iter >= 5 and loss > prv_loss: break
+            if iter >= 5: break
             loss.backward()
             opt2.step()
             prv_loss = loss.item()
@@ -95,38 +150,6 @@ def dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,shape_gt=None,fgt=Non
             f_error = torch.mean(torch.abs(f-ftrue))
             print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
 
-        shape = shape.detach()
-        for iter in itertools.count():
-            opt1.zero_grad()
-            f = torch.sigmoid(calib_net)*2000
-            K = torch.zeros(3,3).float()
-            K[0,0] = f
-            K[1,1] = f
-            K[2,2] = 1
-
-            # differentiable PnP pose estimation
-            pose = bpnp(x2d,shape,K,ini_pose)
-            pred = BPnP.batch_project(pose,shape,K)
-
-            # apply loss
-            loss = (torch.norm(pred - x2d,dim=-1)).mean()
-            if iter >= 5 and loss > prv_loss: break
-            prv_loss = loss.item()
-            loss.backward()
-            opt1.step()
-
-            # log results on console
-            if not shape_gt is None:
-                d,Z,tform = util.procrustes(shape.detach().numpy(),shape_gt.detach().numpy())
-                rmse = torch.norm(shape_gt - Z,dim=1).mean().detach()
-            else:
-                rmse = -1
-            if not fgt is None:
-                ftrue = fgt.item()
-            else:
-                fgt = -1
-            f_error = torch.mean(torch.abs(f-ftrue))
-            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
 
         if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
         curloss = loss
@@ -159,6 +182,10 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
     sigma = torch.diag(sigma.squeeze())
     lm_eigenvec = torch.mm(lm_eigenvec, sigma)
 
+    # create bpnp sfm model
+    sfm_net  = torchvision.models.vgg11()
+    sfm_net.classifier = torch.nn.Linear(25088,68*3)
+
     # define loader and initialize logging variables
     loader = getLoader(db)
     f_pred = []
@@ -178,102 +205,9 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         M = x_img_gt.shape[0]
         N = 68
 
-        # create bpnp camera calibration model
+        # create bpnp camera calibration/sfm model
         calib_net= (1.1*torch.randn(1)).requires_grad_()
-
-        # create bpnp sfm model
-        sfm_net  = torchvision.models.vgg11()
-        sfm_net.classifier = torch.nn.Linear(25088,N*3)
-
-        ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
-        x2d = x_img.view((M,N,2))
-        x_img_pts = x_img.reshape((M,N,2)).permute(0,2,1)
-        one = torch.ones(M*N,1)
-        x_img_one = torch.cat([x_img,one],dim=1)
-        x = x_img_one.permute(1,0)
-
-        # run the model
-        f = torch.sigmoid(calib_net)*2000
-        shape = mu_lm
-        ini_pose = torch.zeros((M,6))
-        ini_pose[:,5] = 99
-        curloss = 100
-
-        # apply dual optimization
-        shape,K,R,T = dualoptimization(x,ptsI,x2d,ini_pose,calib_net,sfm_net,fgt=fgt)
-        f = K[0,0].detach()
-
-        # get final result to save
-        depth = torch.norm(x_cam_gt.mean(2),dim=1)
-
-        # get errors
-        reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
-        rel_errors = util.getRelReprojError3(x_cam_gt,shape,R,T)
-
-        reproj_error = reproj_errors2.mean()
-        rel_error = rel_errors.mean()
-        f_error = torch.abs(fgt - f) / fgt
-
-        # save final prediction
-        f_pred.append(f.detach().cpu().item())
-        d_pred.append(depth.detach().cpu().numpy())
-        shape_pred.append(shape.detach().cpu().numpy())
-
-        error_2d.append(reproj_error.cpu().data.item())
-        error_rel3d.append(rel_error.cpu().data.item())
-        error_relf.append(f_error.cpu().data.item())
-
-        print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-
-    # prepare output file
-    matdata = {}
-    matdata['f_pred'] = np.stack(f_pred)
-    matdata['d_pred'] = np.concatenate(d_pred)
-    matdata['shape_pred'] = np.stack(shape_pred)
-    matdata['error_2d'] = np.array(error_2d)
-    matdata['error_relf'] = np.array(error_relf)
-    matdata['error_rel3d'] = np.stack(error_rel3d)
-    scipy.io.savemat(outfile,matdata)
-
-    print(f"MEAN seterror_2d: {np.mean(error_2d)}")
-    print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
-    print(f"MEAN seterror_relf: {np.mean(error_relf)}")
-
-def testBIWIID(modelin=args.model,outfile=args.out,optimize=args.opt):
-    # mean shape and eigenvectors for 3dmm
-    data3dmm = dataloader.SyntheticLoader()
-    mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
-    mu_lm[:,2] = mu_lm[:,2]*-1
-    lm_eigenvec = torch.from_numpy(data3dmm.lm_eigenvec).float().detach()
-    sigma = torch.from_numpy(data3dmm.sigma).float().detach()
-    sigma = torch.diag(sigma.squeeze())
-    lm_eigenvec = torch.mm(lm_eigenvec, sigma)
-
-    # define loader and initialize logging variables
-    loader = dataloader.BIWIIDLoader()
-    f_pred = []
-    d_pred = []
-    shape_pred = []
-    error_2d = []
-    error_relf = []
-    error_rel3d = []
-    for idx in range(len(loader)):
-
-        # load the data
-        data = loader[idx]
-        x_cam_gt = data['x_cam_gt']
-        fgt = data['f_gt']
-        x_img = data['x_img']
-        x_img_gt = data['x_img_gt']
-        M = x_img_gt.shape[0]
-        N = 68
-
-        # create bpnp camera calibration model
-        calib_net= (1.1*torch.randn(1)).requires_grad_()
-
-        # create bpnp sfm model
-        sfm_net  = torchvision.models.vgg11()
-        sfm_net.classifier = torch.nn.Linear(25088,N*3)
+        sfm_net.load_state_dict(torch.load('model/bpnp_sfm.net'))
 
         ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
         x2d = x_img.view((M,N,2))
@@ -401,7 +335,6 @@ def test(modelin=args.model,outfile=args.out,feature_transform=args.ft):
             all_f.append(fgt.numpy()[0])
 
             ptsI = x_img.reshape((M,N,2)).permute(0,2,1)
-            x2d = x_img.view((M,N,2))
             x_img_pts = x_img.reshape((M,N,2)).permute(0,2,1)
             one = torch.ones(M*N,1)
             x_img_one = torch.cat([x_img,one],dim=1)

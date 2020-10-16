@@ -6,13 +6,19 @@ import os
 import scipy.io
 import torch
 import numpy as np
+import torchvision
 
+#from logger import Logger
 from model2 import PointNet
 import dataloader
 import util
+import BPnP
 
-####################################################
+bpnp = BPnP.BPnP.apply
 
+##############################################################################################
+##############################################################################################
+##############################################################################################
 parser = argparse.ArgumentParser(description="training arguments")
 parser.add_argument("--model", default="net.pt")
 parser.add_argument("--out",default="results/exp.mat")
@@ -27,7 +33,6 @@ torch.manual_seed(0)
 ##############################################################################################
 ##############################################################################################
 ##############################################################################################
-
 data3dmm = dataloader.SyntheticLoader()
 mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
 mu_lm[:,2] = mu_lm[:,2]*-1
@@ -55,11 +60,7 @@ def getLoader(db):
         loader = dataloader.BIWIIDLoader()
     return loader
 
-##############################################################################################
-##############################################################################################
-##############################################################################################
-
-# dual optimization to optimize focal length and 3D shape
+# HELPER FUNCTIONS
 def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode='still',ptstart=0):
 
     if mode == 'still':
@@ -67,16 +68,22 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
     else:
         alpha = 0.001
 
+    ini_pose = torch.zeros((M,6))
+    ini_pose[:,5] = 99
+
     # define what weights gets optimized
     calib_net.eval()
     sfm_net.eval()
     trainfc(calib_net)
     trainfc(sfm_net)
 
+    x2d = x.squeeze().permute(1,0).reshape((M,N,2))
     ptsI = x.squeeze().permute(1,0).reshape((M,N,2)).permute(0,2,1)
     ptsI = ptsI[:,:,ptstart:]
+    x2d = x2d[:,ptstart:,:]
+
     # run the model
-    f = calib_net(x) + 300
+    f = calib_net(x)+300
     betas = sfm_net(x)
     betas = betas.squeeze(0).unsqueeze(-1)
     shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
@@ -84,7 +91,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
     shape = shape[ptstart:,:]
 
     opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-5)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=10)
     curloss = 100
     for outerloop in itertools.count():
         shape = shape.detach()
@@ -96,24 +103,21 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
             K[1,1] = f
             K[2,2] = 1
 
-            # pose estimation
-            km,c_w,scaled_betas, alphas = util.EPnP(ptsI,shape,K)
-            _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
-            #shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
-            error_time = util.getTimeConsistency(shape,R,T)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
+            # differentiable PnP pose estimation
+            pose = bpnp(x2d,shape,K,ini_pose)
+            pred = BPnP.batch_project(pose,shape,K)
 
             # apply loss
-            loss = error2d.mean() + alpha*error_time
-            if iter >= 5: break
+            loss = (torch.norm(pred - x2d,dim=-1)).mean()
+            if iter >= 5 : break
             prv_loss = loss.item()
             loss.backward()
             opt1.step()
 
             # log results on console
             if not shape_gt is None:
-                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+                d,Z,tform = util.procrustes(shape.detach().numpy(),shape_gt.detach().numpy())
+                rmse = torch.norm(shape_gt - Z,dim=1).mean().detach()
             else:
                 rmse = -1
             if not fgt is None:
@@ -121,7 +125,7 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
             else:
                 fgt = -1
             f_error = torch.mean(torch.abs(f-ftrue))
-            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | error_time: {error_time.item():.2f} | rmse: {rmse:.2f}")
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
 
         f = f.detach()
         for iter in itertools.count():
@@ -139,17 +143,11 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
             K[2,2] = 1
 
             # differentiable PnP pose estimation
-            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-            _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error2d = util.getReprojError2(ptsI,shape,R,T,K,show=False,loss='l2')
-            Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
-            #shape_error = util.getShapeError(ptsI,Xc,shape,f,R,T)
-            error_time = util.getTimeConsistency(shape,R,T)
+            pose = bpnp(x2d,shape,K,ini_pose)
+            pred = BPnP.batch_project(pose,shape,K)
 
             # apply loss
-            #loss = error2d.mean()
-            loss = error2d.mean() + alpha*error_time
-            #if iter >= 5 and loss > prv_loss: break
+            loss = (torch.norm(pred - x2d,dim=-1)).mean()
             if iter >= 5: break
             loss.backward()
             opt2.step()
@@ -157,7 +155,8 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
 
             # log results on console
             if not shape_gt is None:
-                rmse = torch.norm(shape_gt - shape,dim=1).mean().item()
+                d,Z,tform = util.procrustes(shape.detach().numpy(),shape_gt.detach().numpy())
+                rmse = torch.norm(shape_gt - Z,dim=1).mean().detach()
             else:
                 rmse = -1
             if not fgt is None:
@@ -165,16 +164,28 @@ def dualoptimization(x,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mode=
             else:
                 fgt = -1
             f_error = torch.mean(torch.abs(f-ftrue))
-            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {error2d.mean().item():.3f} | error_time: {error_time.item():.2f} | rmse: {rmse:.2f}")
+            print(f"iter: {iter} | error: {loss.item():.3f} | f/fgt: {f.item():.1f}/{ftrue:.1f} | error2d: {loss.item():.3f} | rmse: {rmse:.2f}")
 
         if torch.abs(curloss  - loss) <= 0.01 or curloss < loss: break
         curloss = loss
+
+    km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
+    Xc,R,T,mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
     return shape,K,R,T
 
-##############################################################################################
-##############################################################################################
-##############################################################################################
-# testing on different datasets
+def getLoader(db):
+    if db == 'syn':
+        loader = dataloader.TestLoader(f_test)
+    elif db == 'human36':
+        loader = dataloader.Human36Loader()
+    elif db == 'cad120':
+        loader = dataloader.Cad120Loader()
+    elif db == 'biwi':
+        loader = dataloader.BIWILoader()
+    elif db == 'biwiid':
+        loader = dataloader.BIWIIDLoader()
+    return loader
+
 def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
     # define model, dataloader, 3dmm eigenvectors, optimization method
     calib_net = PointNet(n=1)
@@ -196,20 +207,22 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
     sigma = torch.diag(sigma.squeeze())
     lm_eigenvec = torch.mm(lm_eigenvec, sigma)
 
-    # define loader
+    # define loader and initialize logging variables
     loader = getLoader(db)
     f_pred = []
+    d_pred = []
     shape_pred = []
     error_2d = []
     error_relf = []
     error_rel3d = []
-    ptstart=17
-    for sub in range(len(loader)):
-        batch = loader[sub]
-        x_cam_gt = batch['x_cam_gt']
-        fgt = batch['f_gt']
-        x_img = batch['x_img']
-        x_img_gt = batch['x_img_gt']
+    ptstart=0
+    for idx in range(len(loader)):
+        # load the data
+        data = loader[idx]
+        x_cam_gt = data['x_cam_gt']
+        fgt = data['f_gt']
+        x_img = data['x_img']
+        x_img_gt = data['x_img_gt']
         M = x_img_gt.shape[0]
         N = x_img_gt.shape[-1]
 
@@ -230,7 +243,7 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
         _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
         error_time = util.getTimeConsistency(shape,R,T)
-        if error_time > 10:
+        if error_time > 20:
             mode='walk'
         else:
             mode='still'
@@ -239,17 +252,18 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         ptsI = ptsI[:,:,ptstart:]
         shape = shape[ptstart:,:]
         x_cam_gt = x_cam_gt[:,:,ptstart:]
+        shape_gt = data['x_w_gt'][ptstart:,:] if db == 'biwi' else None
         M = x_img_gt.shape[0]
         N = x_img_gt.shape[-1]
 
-        # additional optimization on initial solution
+        # apply dual optimization
         if optimize:
             calib_net.load_state_dict(torch.load(calib_path))
             sfm_net.load_state_dict(torch.load(sfm_path))
             if db == 'biwi':
-                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt,M=M,N=N,mode=mode,ptstart=ptstart)
+                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt,M=M,N=N,mode=mode)
             else:
-                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N,mode=mode,ptstart=ptstart)
+                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,fgt=fgt,M=M,N=N,mode=mode)
             f = K[0,0].detach()
         else:
             K = torch.zeros(3,3).float()
@@ -258,6 +272,8 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
             K[2,2] = 1
             km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
             Xc, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
+
+        print(shape.shape)
 
         # get errors
         reproj_errors2 = util.getReprojError2(ptsI,shape,R,T,K)
@@ -276,29 +292,25 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         error_relf.append(f_error.cpu().data.item())
 
         print(f" f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
-        #end for
 
     # prepare output file
-    out_shape = np.stack(shape_pred)
-    out_f = np.stack(f_pred)
-
     matdata = {}
-    matdata['shape'] = np.stack(out_shape)
-    matdata['f'] = np.stack(out_f)
+    matdata['f_pred'] = np.stack(f_pred)
+    matdata['shape_pred'] = np.stack(shape_pred)
     matdata['error_2d'] = np.array(error_2d)
-    matdata['error_rel3d'] = np.array(error_rel3d)
     matdata['error_relf'] = np.array(error_relf)
+    matdata['error_rel3d'] = np.stack(error_rel3d)
     scipy.io.savemat(outfile,matdata)
 
     print(f"MEAN seterror_2d: {np.mean(error_2d)}")
     print(f"MEAN seterror_rel3d: {np.mean(error_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(error_relf)}")
 
+def test(modelin=args.model,outfile=args.out,optimize=args.opt,feature_transform=args.ft):
 
-def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
     # define model, dataloader, 3dmm eigenvectors, optimization method
-    calib_net = PointNet(n=1,feature_transform=ft)
-    sfm_net = PointNet(n=199,feature_transform=ft)
+    calib_net = PointNet(n=1)
+    sfm_net = PointNet(n=199)
     if modelin != "":
         calib_path = os.path.join('model','calib_' + modelin)
         sfm_path = os.path.join('model','sfm_' + modelin)
@@ -309,6 +321,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
 
     # mean shape and eigenvectors for 3dmm
     M = 100
+    N = 68
     data3dmm = dataloader.SyntheticLoader()
     mu_lm = torch.from_numpy(data3dmm.mu_lm).float().detach()
     mu_lm[:,2] = mu_lm[:,2]*-1
@@ -350,8 +363,8 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
         N = 68;
         batch_size = 1;
 
-        for j,data in enumerate(loader):
-            if j >= 10: break
+        for j, data in enumerate(loader):
+            if j == 10: break
             # load the data
             x_cam_gt = data['x_cam_gt']
             shape_gt = data['x_w_gt']
@@ -373,24 +386,11 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
             shape = mu_lm + torch.mm(lm_eigenvec,betas).squeeze().view(N,3)
             shape = shape - shape.mean(0).unsqueeze(0)
 
-            # get motion measurement guess
-            K = torch.zeros((3,3)).float()
-            K[0,0] = f
-            K[1,1] = f
-            K[2,2] = 1
-            km,c_w,scaled_betas,alphas = util.EPnP(ptsI,shape,K)
-            _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI,K)
-            error_time = util.getTimeConsistency(shape,R,T)
-            if error_time > 10:
-                mode='walk'
-            else:
-                mode='still'
-
             # apply dual optimization
             if optimize:
                 calib_net.load_state_dict(torch.load(calib_path))
                 sfm_net.load_state_dict(torch.load(sfm_path))
-                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt,mode=mode)
+                shape,K,R,T = dualoptimization(x,calib_net,sfm_net,shape_gt=shape_gt,fgt=fgt)
                 f = K[0,0].detach()
             else:
                 K = torch.zeros(3,3).float()
@@ -424,6 +424,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
             error_relf.append(f_error.cpu().data.item())
 
             print(f"f/sequence: {f_test}/{j}  | f/fgt: {f.item():.3f}/{fgt.item():.3f} |  f_error_rel: {f_error.item():.4f}  | rmse: {reconstruction_error.item():.4f}  | rel rmse: {rel_error.item():.4f}    | 2d error: {reproj_error.item():.4f}")
+            #end for
 
         avg_2d = np.mean(error_2d)
         avg_rel3d = np.mean(error_rel3d)
@@ -448,6 +449,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
     allerror_rel3d = np.stack(allerror_rel3d).flatten()
 
     matdata = {}
+    #matdata['shape'] = shape.detach().cpu().numpy()
     matdata['fvals'] = np.array(f_vals)
     matdata['all_f'] = np.array(all_f)
     matdata['all_fpred'] = np.array(all_fpred)
@@ -467,9 +469,7 @@ def test(modelin=args.model,outfile=args.out,optimize=args.opt,ft=args.ft):
     print(f"MEAN seterror_3d: {np.mean(seterror_3d)}")
     print(f"MEAN seterror_rel3d: {np.mean(seterror_rel3d)}")
     print(f"MEAN seterror_relf: {np.mean(seterror_relf)}")
-
-    return np.mean(seterror_relf)
-
+    #end function
 
 ####################################################################################3
 if __name__ == '__main__':
@@ -478,4 +478,3 @@ if __name__ == '__main__':
         test()
     else:
         testReal()
-

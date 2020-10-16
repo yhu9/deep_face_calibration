@@ -592,6 +592,15 @@ def getTimeConsistency(pW,R,T):
     error = torch.mean(torch.norm(pct[:M-1,:,:] - pct[1:,:,:],dim=1))
     return error
 
+# getTimeConsistency(pW,R,T)
+def getTimeConsistency2(pW,R,T):
+    M = R.shape[0]
+    pc = torch.bmm(R,torch.stack(M*[pW]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+
+    error = torch.norm(pct[:M-1,:,:] - pct[1:,:,:],dim=1)
+    return error
+
 #INPUT:
 # T     (M,3)
 #OUTPUT:
@@ -706,7 +715,7 @@ def getReprojError2_(pimg,pct,A,show=False,loss='l2'):
     if loss == 'l2':
         error  = torch.norm(diff,p=2,dim=1).mean(1)
     elif loss == 'l1':
-        error = torch.abs(diff)
+        error = torch.abs(diff).mean(1).mean(1)
 
     if show:
         #import pptk
