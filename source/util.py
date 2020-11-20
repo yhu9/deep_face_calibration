@@ -112,7 +112,6 @@ def batchSolveAlphas(Pw,control_w):
 
     return alphas
 
-
 #Input:
 #   alphas                  (3,N)
 #   p_img                   (M,N,2)
@@ -158,6 +157,95 @@ def setupM(alphas,p_img,px,py,f):
     return M
 
 #Input:
+#   alphas                  (3,N)
+#   p_img                   (M,N,2)
+#   f                       (M)
+#Output:
+#
+#   M                       (M,2*N,12)
+def setupM_single(alphas,p_img,f):
+    views = p_img.shape[0]
+    N = p_img.shape[1]
+    if p_img.is_cuda:
+        M = torch.zeros((views,2*N,12)).float().cuda()
+    else:
+        M = torch.zeros((views,2*N,12))
+
+    view_alphas = torch.stack(views*[alphas])
+
+    M[:,0::2,0] = view_alphas[:,0,:]*f.unsqueeze(1)
+    M[:,0::2,1] = 0
+    M[:,0::2,2] = alphas[0,:].unsqueeze(0) * (p_img[:,:,0])
+    M[:,0::2,3] = view_alphas[:,1,:]*f.unsqueeze(1)
+    M[:,0::2,4] = 0
+    M[:,0::2,5] = alphas[1,:].unsqueeze(0) * (p_img[:,:,0])
+    M[:,0::2,6] = view_alphas[:,2,:]*f.unsqueeze(1)
+    M[:,0::2,7] = 0
+    M[:,0::2,8] = alphas[2,:].unsqueeze(0) * (p_img[:,:,0])
+    M[:,0::2,9] = view_alphas[:,3,:]*f.unsqueeze(1)
+    M[:,0::2,10] = 0
+    M[:,0::2,11] = alphas[3,:].unsqueeze(0) * (p_img[:,:,0])
+    M[:,1::2,0] = 0
+    M[:,1::2,1] = view_alphas[:,0,:]*f.unsqueeze(1)
+    M[:,1::2,2] = alphas[0,:].unsqueeze(0) * (p_img[:,:,1])
+    M[:,1::2,3] = 0
+    M[:,1::2,4] = view_alphas[:,1,:]*f.unsqueeze(1)
+    M[:,1::2,5] = alphas[1,:].unsqueeze(0) * (p_img[:,:,1])
+    M[:,1::2,6] = 0
+    M[:,1::2,7] = view_alphas[:,2,:]*f.unsqueeze(1)
+    M[:,1::2,8] = alphas[2,:].unsqueeze(0) * (p_img[:,:,1])
+    M[:,1::2,9] = 0
+    M[:,1::2,10] = view_alphas[:,3,:]*f.unsqueeze(1)
+    M[:,1::2,11] = alphas[3,:].unsqueeze(0) * (p_img[:,:,1])
+
+    return M
+
+'''
+#Input:
+#   alphas                  (3,N)
+#   p_img                   (N,2)
+#   px                      scalar
+#   py                      scalar
+#   f                       scalar
+#Output:
+#
+#   M                       (2*N,12)
+def setupM_single(alphas,p_img,px,py,f):
+    N = p_img.shape[0]
+    if p_img.is_cuda:
+        M = torch.zeros((2*N,12)).float().cuda()
+    else:
+        M = torch.zeros((2*N,12))
+
+    M[0::2,0] = alphas[0,:]*f
+    M[0::2,1] = 0
+    M[0::2,2] = alphas[0,:] * (px - p_img[:,0])
+    M[0::2,3] = alphas[1,:]*f
+    M[0::2,4] = 0
+    M[0::2,5] = alphas[1,:] * (px-p_img[:,0])
+    M[0::2,6] = alphas[2,:]*f
+    M[0::2,7] = 0
+    M[0::2,8] = alphas[2,:] * (px-p_img[:,0])
+    M[0::2,9] = alphas[3,:]*f
+    M[0::2,10] = 0
+    M[0::2,11] = alphas[3,:] * (px-p_img[:,0])
+    M[1::2,0] = 0
+    M[1::2,1] = alphas[0,:]*f
+    M[1::2,2] = alphas[0,:] * (py-p_img[:,1])
+    M[1::2,3] = 0
+    M[1::2,4] = alphas[1,:]*f
+    M[1::2,5] = alphas[1,:]* (py-p_img[:,1])
+    M[1::2,6] = 0
+    M[1::2,7] = alphas[2,:]*f
+    M[1::2,8] = alphas[2,:] * (py-p_img[:,1])
+    M[1::2,9] = 0
+    M[1::2,10] = alphas[3,:]*f
+    M[1::2,11] = alphas[3,:] * (py-p_img[:,1])
+
+    return M
+'''
+
+#Input:
 # control_w             (4x4)
 #
 #Output:
@@ -185,6 +273,38 @@ def getDistances(control_w):
 
 # scale control points and get camera coordinates via method similar to procrustes
 #Input:
+#   c_c                 (3x4)
+#   c_w                 (3x4)
+#   alphas              (4xN)
+#   x_w                 (Nx3)
+#
+#Output:
+#   sc_c                (3x4)
+#   sx_c                (Nx3)
+#   s                   (1)
+def scaleControlPoints_single(c_c,c_w,alphas,x_w):
+    x_c = torch.mm(c_c,alphas)
+
+    centered_xw = x_w - torch.mean(x_w,dim=0).unsqueeze(0)
+    d_w = torch.norm(centered_xw,p=2,dim=1)
+    centered_xc = x_c - torch.mean(x_c,dim=1).unsqueeze(1)
+    d_c = torch.norm(centered_xc,p=2,dim=0)
+
+    # least square solution to scale
+    s = 1.0 /((1.0/torch.sum(d_c*d_c) * torch.sum(d_c*d_w)))
+
+    # apply scale onto c_c and recompute the camera coordinates
+    sc_c = c_c / s
+    sx_c = torch.mm(sc_c,alphas).T
+
+    # fix the sign so negative depth is not possible
+    negdepth_mask = sx_c[:,-1] < 0
+    sx_c = sx_c * (negdepth_mask.float().unsqueeze(1) * -2 +1)
+
+    return sc_c, sx_c, s
+
+# scale control points and get camera coordinates via method similar to procrustes
+#Input:
 #   c_c                 (Mx3x4)
 #   c_w                 (3x4)
 #   alphas              (4xN)
@@ -205,9 +325,6 @@ def scaleControlPoints(c_c,c_w,alphas,x_w):
     centered_xc = x_c - torch.mean(x_c,dim=2).unsqueeze(2)
     d_c = torch.norm(centered_xc,p=2,dim=1)
 
-    #s = print(d_w.shape)
-    #s = torch.mean(d_c / d_w.unsqueeze(0),axis=1)
-
     # least square solution to scale
     s = 1.0 /((1.0/(torch.sum(d_c*d_c,dim=1)) * torch.sum(d_c*d_w.unsqueeze(0),dim=1)))
 
@@ -216,6 +333,7 @@ def scaleControlPoints(c_c,c_w,alphas,x_w):
     sx_c = torch.bmm(sc_c,rep_alpha).permute(0,2,1)
 
     # fix the sign so negative depth is not possible
+    #print(sx_c.shape)
     negdepth_mask = sx_c[:,:,-1] < 0
     sx_c = sx_c * (negdepth_mask.float().unsqueeze(2) * -2 +1)
 
@@ -265,10 +383,10 @@ def getExtrinsics(x_c,p_w):
 
     R = torch.bmm(u,v.permute(0,2,1))
 
-    #rdet = torch.det(r)
+    #rdet = torch.det(R).detach()
     #redetmask = (rdet < 0).float() * -2 + 1
     #redetmask = redetmask.detach()
-    #R = r * redetmask.unsqueeze(1).unsqueeze(1)
+    #R = R * redetmask.unsqueeze(1).unsqueeze(1)
 
     # solve T using centers
     rep_w_center = torch.stack(M * [w_center]).unsqueeze(2)
@@ -522,6 +640,7 @@ def FundamentalError(pI,K,R,T):
 # T         (M,3)
 #OUTPUT
 # scalar
+'''
 def getShapeError(pI,pC,pW,f,R,T):
 
     M = pI.shape[0]
@@ -553,7 +672,50 @@ def getShapeError(pI,pC,pW,f,R,T):
     error = torch.mean(torch.norm(diff,dim=1))
 
     return error
+'''
 
+#INPUT
+# pI        (M,2,N)
+# pC        (M,3,N)
+# pW        (N,3)
+# f         (1)
+# R         (M,3,3)
+# T         (M,3)
+#OUTPUT
+# scalar
+def getShapeError(pI,pC,pW,f,R,T):
+
+    M = pI.shape[0]
+    N = pI.shape[2]
+    kinv = torch.zeros((M,3,3))
+    kinv[:,0,0] = -1/f
+    kinv[:,1,1] = -1/f
+    kinv[:,2,2] = 1
+
+    pI = torch.cat((pI,torch.ones((M,1,N))),dim=1)
+    proj = torch.bmm(kinv,pI)
+    z = pC[:,2,:].unsqueeze(1)
+
+    pC_proj = proj * z
+    pW_proj = torch.bmm(R.permute(0,2,1),pC_proj - T.unsqueeze(-1))
+    #pW = torch.stack(M*[pW.T])
+
+    diff = pC_proj - pC
+
+    error = torch.mean(torch.norm(diff,dim=1))
+
+    #m1 = torch.sign(pW_proj[:,0,0]) != torch.sign(pW[:,0,0])
+    #m2 = torch.sign(pW_proj[:,1,8]) != torch.sign(pW[:,1,8])
+    #m3 = torch.sign(pW_proj[:,2,33]) != torch.sign(pW[:,2,33])
+
+    #pW_proj[m1,0,:] = pW_proj[m1,0,:] * -1
+    #pW_proj[m2,1,:] = pW_proj[m2,1,:] * -1
+    #pW_proj[m3,2,:] = pW_proj[m3,2,:] * -1
+
+    #diff = pW_proj - pW
+    #error = torch.mean(torch.norm(diff,dim=1))
+
+    return error
 #INPUT
 # pI        (M,2,N)
 # pC        (M,3,N)
@@ -669,6 +831,7 @@ def get3DConsistency(pI,pW,kinv,R,T):
 #
 #OUTPUT:
 #   error               (M)
+'''
 def getRelReprojError3(xcam,pw,R,T):
 
     M = xcam.shape[0]
@@ -691,6 +854,19 @@ def getRelReprojError3(xcam,pw,R,T):
     #v.set(point_size=10)
     #quit()
     return torch.mean(error / d,dim=1)
+'''
+
+def getRelReprojError3(xcam,pw,R,T):
+
+    M = xcam.shape[0]
+    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+
+    dgt = torch.norm(torch.mean(pct,dim=2),dim=1)
+    d = torch.norm(torch.mean(xcam,dim=2),dim=1)
+    diff = torch.abs(dgt - d)
+
+    return diff / d
 
 # batched reprojection error using intrinsics and extrinsics on world coordinates
 #
@@ -741,6 +917,90 @@ def getReprojError2_(pimg,pct,A,show=False,loss='l2'):
         quit()
 
     return error
+
+# batched reprojection error using intrinsics and extrinsics on world coordinates
+#
+#INPUT:
+#   pimg                (M,2,N)
+#   pw                  (N,3)
+#   R                   (M,3,3)
+#   T                   (M,3)
+#   A                   (M,3,3)
+#
+#OUTPUT:
+#   error               (M)
+def getError(pimg,pw,R,T,A,show=False,loss='l2'):
+    M = pimg.shape[0]
+    N = pimg.shape[2]
+    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
+    #pc = torch.bmm(R,pw.permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+    proj = torch.bmm(A,pct)
+    proj_img = proj / proj[:,-1,:].unsqueeze(1)
+
+    pimg_pred = proj_img[:,:2,:]
+    diff1 = pimg - pimg_pred
+    diff2 = pimg*-1 - pimg_pred
+    if loss == 'l2':
+        error1 = torch.norm(diff1,p=2,dim=1).mean(1)
+        error2 = torch.norm(diff2,p=2,dim=1).mean(1)
+    elif loss == 'l1':
+        error1 = torch.abs(diff1).mean(1)
+        error2 = torch.abs(diff2).mean(1)
+
+    error = error1 if torch.mean(error1) < torch.mean(error2) else error2
+
+    if show:
+        pimg = pimg if torch.mean(error1) < torch.mean(error2) else pimg*-1
+        #import pptk
+        #x = pct[-1].T.detach().cpu().numpy()
+        #v = pptk.viewer(x)
+        #v.set(point_size=1.1)
+        #for i in range(M):
+        #    pt1 = pimg[i].T.cpu().numpy()
+        #    scatter(pt1)
+
+        pta = pimg[0].T.cpu().numpy()
+        #ptb = pimg[-1].T.cpu().numpy()
+        ptc = pimg_pred[0].detach().T.cpu().numpy()
+        #ptd = pimg_pred[-1].detach().T.cpu().numpy()
+        plt.scatter(pta[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        #plt.scatter(ptb[:,0],pta[:,1],s=15,facecolors='none',edgecolors='green')
+        plt.scatter(ptc[:,0],ptc[:,1],s=10,marker='.',edgecolors='red')
+        #plt.scatter(ptb[:,0],pta[:,1],s=10,marker='.',edgecolors='red')
+
+        #plt.xlim((-320,320))
+        #plt.ylim((-240,240))
+        plt.show()
+        quit()
+
+    return error
+
+# get relative depth error
+def getDepthError(area,pw,R,T):
+    M = area.shape[0]
+    N = pw.shape[0]
+    pc = torch.bmm(R,torch.stack(M*[pw]).permute(0,2,1))
+    pct = pc + T.unsqueeze(2)
+
+    center = torch.mean(pct,dim=2)
+    depth = center[:,2]
+
+    #dgt = (area[:M-1] - area[1:])
+    #dpred = (depth[:M-1] - depth[1:]) * -1
+    #print(area)
+    #print(depth)
+
+    a = torch.stack(M*[area])
+    dgt = (a - a.T)*-1
+    b = torch.stack(M*[depth])
+    dpred = b - b.T
+
+    error = torch.mean(torch.abs(torch.atan(dgt) - torch.atan(dpred)))
+    #error = torch.mean(torch.abs(torch.sign(dgt) - torch.sign(dpred)))
+
+    return error
+
 # batched reprojection error using intrinsics and extrinsics on world coordinates
 #
 #INPUT:
@@ -762,11 +1022,16 @@ def getReprojError2(pimg,pw,R,T,A,show=False,loss='l2'):
     proj_img = proj / proj[:,-1,:].unsqueeze(1)
 
     pimg_pred = proj_img[:,:2,:]
-    diff = pimg - pimg_pred
+    diff1 = pimg - pimg_pred
+    diff2 = pimg*-1 - pimg_pred
     if loss == 'l2':
-        error  = torch.norm(diff,p=2,dim=1).mean(1)
+        error1 = torch.norm(diff1,p=2,dim=1).mean(1)
+        error2 = torch.norm(diff2,p=2,dim=1).mean(1)
     elif loss == 'l1':
-        error = torch.abs(diff)
+        error1 = torch.abs(diff1).mean(1)
+        error2 = torch.abs(diff2).mean(1)
+
+    error = error1 if torch.mean(error1) < torch.mean(error2) else error2
 
     if show:
         #import pptk
@@ -975,7 +1240,7 @@ def gauss_newton_step(betas,rho,L):
     next_betas = betas.unsqueeze(-1) + rinv_qtb
 
     error = torch.bmm(b.view((M,1,6)),b.view((M,6,1)))
-    return next_betas.squeeze(), error
+    return next_betas.squeeze(-1), error
 
 # compute the derivatives of the eigenvector summation for gauss newton
 #
@@ -1339,6 +1604,90 @@ def scatter(pts,color=[255,0,0]):
     plt.scatter(pts[:,0],pts[:,1])
     return
 
+'''
+#INPUT:
+# x_img         (N,2)
+# x_w           (N,3)
+# K             (3,3)
+def EPnP_single(x_img,x_w,K):
+    # get control points
+    f = K[0,0]
+    px = K[0,2]
+    py = K[1,2]
+
+    # get control points
+    c_w = getControlPoints(x_w)
+
+    # solve alphas
+    alphas = solveAlphas(x_w,c_w)
+    if x_img.is_cuda:
+        alphas = alphas.cuda()
+    Matrix = setupM_single(alphas,x_img,px,py,f)
+
+    # get last 4 eigenvectors
+    u,d,v = torch.svd(Matrix)
+    km = v[:,-4:]
+
+    # sovle N=1
+    beta_n1 = torch.zeros(4)
+    if x_img.is_cuda:
+        beta_n1 = beta_n1.cuda()
+    beta_n1[3] = 1
+    c_c_n1 = km[:,-1].reshape((4,3)).T
+    _, x_c_n1,s1 = scaleControlPoints_single(c_c_n1,c_w[:3,:],alphas,x_w)
+
+
+    return km, c_w, beta_n1 / s1, alphas
+'''
+
+
+# epnp algorithm to solve for camera pose with gauss newton
+#INPUT:
+# x_img         (M,2,N)
+# x_w           (N,3)
+# K             (3,3)
+def EPnP_single(x_img,x_w,K):
+    M = x_img.shape[0]
+    N = x_img.shape[2]
+    f = K[:,0,0]
+
+    # get control points
+    c_w = getControlPoints(x_w)
+
+    # solve alphas
+    alphas = solveAlphas(x_w,c_w)
+    if x_img.is_cuda:
+        alphas = alphas.cuda()
+    Matrix = setupM_single(alphas,x_img.permute(0,2,1),f)
+
+    if ~torch.all(Matrix == Matrix):
+        print(Matrix)
+        print(f)
+        print(x_w)
+    #    quit()
+    # get last 4 eigenvectors
+    u,d,v = torch.svd(Matrix)
+    #try:
+    #    u,d,v = torch.svd(Matrix)
+    #except:
+    #    print(Matrix)
+    #    u,d,v = torch.svd(Matrix + 1e-4*Matrix.mean().detach()*torch.rand(Matrix.shape))
+
+    km = v[:,:,-4:]
+
+    # sovle N=1
+    beta_n1 = torch.zeros((M,4))
+    if x_img.is_cuda:
+        beta_n1 = beta_n1.cuda()
+    beta_n1[:,3] = 1
+    c_c_n1 = km[:,:,-1].reshape((M,4,3)).permute(0,2,1)
+    _, x_c_n1,s1 = scaleControlPoints(c_c_n1,c_w[:3,:],alphas,x_w)
+    mask1 = s1 == s1
+    Rn1, Tn1 = getExtrinsics(x_c_n1[mask1],x_w)
+    #reproj_error2_n1 = getError(x_img[mask1],x_w,Rn1,Tn1,K,show=False,loss='l2')
+
+    return km, c_w, beta_n1 / s1.unsqueeze(1), alphas
+
 # epnp algorithm to solve for camera pose with gauss newton
 #INPUT:
 # x_img         (M,2,N)
@@ -1428,7 +1777,14 @@ def EPnP(x_img,x_w,K):
     return km, c_w, scaled_betas, alphas
 
 # Gauss Newton Optimization on extrinsic
-def optimizeGN(km,c_w,scaled_betas,alphas,x_w,x_img,K):
+#INPUT:
+#   km      (M,12,4)
+#   c_w     (4,4)
+#   scaled_betas    (M,4)
+#   alphas          (4,N)
+#   x_w             (N,3)
+#   x_img           (M,2,N)
+def optimizeGN(km,c_w,scaled_betas,alphas,x_w,x_img):
     M = km.shape[0]
     beta_opt, err = gauss_newton(km,c_w,scaled_betas)
 

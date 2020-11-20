@@ -23,6 +23,34 @@ args = parser.parse_args()
 
 ####################################################
 
+# stack list of videos
+# input:
+#   1. list of dictionaries output by loader
+# output:
+#   2. single dictionary for all videos
+def stackVideos(vids,M,N,device):
+
+    video = {}
+    x_cam_gt = []
+    x_w_gt = []
+    f_gt = []
+    x_img = []
+    alpha_gt = []
+    for v in vids:
+        # get the input and gt values
+        alpha_gt.append(v['alpha_gt'].to(device=device).squeeze())
+        x_cam_gt.append(v['x_cam_gt'].to(device=device))
+        x_w_gt.append(v['x_w_gt'].to(device=device))
+        f_gt.append(v['f_gt'].to(device=device))
+        x_img.append(v['x_img'].reshape(M,N,2).permute(0,2,1).to(device=device))
+
+    video['alpha'] = torch.stack(alpha_gt)
+    video['x_cam_gt'] = torch.cat(x_cam_gt)
+    video['x_w_gt'] = torch.stack(x_w_gt)
+    video['f_gt'] = torch.stack(f_gt)
+    video['x_img'] = torch.cat(x_img)
+
+    return video
 
 def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt,ft=args.ft):
 
@@ -59,36 +87,33 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt,
     # mean shape and eigenvectors for 3dmm
     mu_lm = torch.from_numpy(loader.mu_lm).float()#.to(device=device)
     mu_lm[:,2] = mu_lm[:,2] * -1
-    mu_lm = torch.stack(batch_size * [mu_lm.to(device=device)])
+    mu_lm = torch.stack(300 * [mu_lm.to(device=device)])
     shape = mu_lm
     lm_eigenvec = torch.from_numpy(loader.lm_eigenvec).float().to(device=device)
     sigma = torch.from_numpy(loader.sigma).float().detach().to(device=device)
     sigma = torch.diag(sigma.squeeze())
     lm_eigenvec = torch.mm(lm_eigenvec, sigma)
-    lm_eigenvec = torch.stack(M * [lm_eigenvec])
-
+    lm_eigenvec = torch.stack(300 * [lm_eigenvec])
 
     # main training loop
     best = 10000
     for epoch in itertools.count():
-        for j,batch in enumerate(loader):
+        for i in range(len(loader)):
+            if i < 3: continue
+            v1 = loader[i]
+            v2 = loader[i-1]
+            v3 = loader[i-2]
+            batch = stackVideos([v1,v2,v3],100,68,device=device)
 
             # get the input and gt values
-            x_cam_gt = batch['x_cam_gt'].to(device=device)
-            shape_gt = batch['x_w_gt'].to(device=device)
-            fgt = batch['f_gt'].to(device=device)
-            x_img = batch['x_img'].to(device=device)
+            alpha_gt = batch['alpha']
+            x_cam_gt = batch['x_cam_gt']
+            shape_gt = batch['x_w_gt']
+            fgt = batch['f_gt']
+            x = batch['x_img']
 
-            #beta_gt = batch['beta_gt'].to(device=device)
-            #x_img_norm = batch['x_img_norm']
-            #x_img_gt = batch['x_img_gt'].to(device=device).permute(0,2,1,3)
-            x = x_img.reshape(M,N,2).permute(0,2,1)
-            batch_size = fgt.shape[0]
-
-            #x_cam_pt = x_cam_gt.permute(0,1,3,2).reshape(batch_size,6800,3)
-            #x = x_img.permute(0,2,1).reshape(batch_size,2,M,N)
-
-            #ptsI = x_img_one.reshape(batch_size,M,N,3).permute(0,1,3,2)[:,:,:2,:]
+            M = x.shape[0]
+            N = x.shape[-1]
 
             # calibration
             f = torch.squeeze(calib_net(x) + 300)
@@ -98,23 +123,42 @@ def train(modelin=args.model, modelout=args.out,device=args.device,opt=args.opt,
             K[:,2,2] = 1
 
             # sfm
-            betas = sfm_net(x)
-            betas = betas.unsqueeze(-1)
-            shape = mu_lm + torch.bmm(lm_eigenvec,betas).squeeze().view(M,N,3)
-            shape = shape - shape.mean(1).unsqueeze(1)
+            alpha = sfm_net(x)
+            alpha = alpha.unsqueeze(-1)
+            shape = mu_lm + torch.bmm(lm_eigenvec,alpha).squeeze().view(M,N,3)
+            shape[0:100] = shape[0:100] - shape[0:100].mean(1).unsqueeze(1)
+            shape[100:200] = shape[100:200] - shape[100:200].mean(1).unsqueeze(1)
+            shape[200:300] = shape[200:300] - shape[200:300].mean(1).unsqueeze(1)
 
             opt1.zero_grad()
             opt2.zero_grad()
-            f_error = torch.mean(torch.abs(f - fgt))
-            #error2d = torch.mean(torch.abs(pred - x_img_gt))
-            error3d = torch.mean(torch.norm(shape - shape_gt,dim=2))
-            error = f_error + error3d
+
+            f1_error = torch.mean(torch.abs(f[0:100] - fgt[0]))
+            f2_error = torch.mean(torch.abs(f[100:200] - fgt[1]))
+            f3_error = torch.mean(torch.abs(f[200:300] - fgt[2]))
+
+            #a1_error = torch.mean(torch.abs(alpha[0:100] - alpha_gt[0]))
+            #a2_error = torch.mean(torch.abs(alpha[100:200] - alpha_gt[1]))
+            #a3_error = torch.mean(torch.abs(alpha[200:300] - alpha_gt[2]))
+
+            s1_error = torch.mean(torch.abs(shape[0:100] - shape_gt[0].unsqueeze(0)))
+            s2_error = torch.mean(torch.abs(shape[100:200] - shape_gt[1].unsqueeze(0)))
+            s3_error = torch.mean(torch.abs(shape[200:300] - shape_gt[2].unsqueeze(0)))
+
+            ferror = f1_error + f2_error + f3_error
+            #aerror = a1_error + a2_error + a3_error
+            serror = s1_error + s2_error + s3_error
+
+            #f_error = torch.mean(torch.abs(f - fgt))
+            #error3d = torch.mean(torch.norm(shape - shape_gt,dim=2))
+            #error = ferror + aerror
+            error = ferror + serror
             error.backward()
             opt1.step()
             opt2.step()
 
-            print(f"iter: {j} | best: {best:.2f} | f_error: {f_error.item():.3f} | error3d: {error3d.item():.3f} ")
-            if j == 1000: break
+            print(f"iter: {i} | best: {best:.2f} | f_error: {ferror.item():.3f} | serror: {serror.item():.3f} ")
+            if i == 1000: break
 
         # save model and increment weight decay
         torch.save(sfm_net.state_dict(), os.path.join('model','sfm_model.pt'))

@@ -221,6 +221,7 @@ class Human36Loader(Dataset):
 
     def __getitem__(self,idx):
         path = self.all_paths[idx]
+        #path = '../data/tmp/human36/processed/S1_Eating 2.55011271_sequence.mat'
         print(f"load: {path}")
         data = scipy.io.loadmat(path)
 
@@ -494,7 +495,16 @@ class BIWILoader(Dataset):
 '''
 
 class MNLoader(Dataset):
-    def __init__(self,M=100,N=68,f=1000):
+    def __init__(self,f,M=100,N=68,addnoise=True,seed=0):
+        if os.path.isdir("../data"):
+            root_dir = os.path.join("../data/synthetic_3dface",f"sequencef{f:04d}")
+        else:
+            root_dir = os.path.join("../data0/synthetic_3dface",f"sequencef{f:04d}")
+        random.seed(seed)
+        self.root_dir = root_dir
+        self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
+        self.files.sort()
+        self.addnoise = addnoise
 
         #self.transform = transforms.Compose([ToTensor()])
         if os.path.isdir("../data"):
@@ -503,7 +513,6 @@ class MNLoader(Dataset):
         else:
             root_dir = "../data0/face_alignment/300w_lp/code/modelgeneration/shape_simple.mat"
             #root_dir = "../data0/face_alignment/300w_lp/code/modelgeneration/shape.mat"
-        shape_data = scipy.io.loadmat(root_dir)
 
         # load shape data
         #self.mu_s = shape_data['mu_s'].T
@@ -511,6 +520,7 @@ class MNLoader(Dataset):
         #lm_eigenvec = shape_data['shape_eigenvec']
         #exp_eigenvec = shape_data['exp_eigenvec']
         #self.sigma = shape_data['sigma'] / 100
+        shape_data = scipy.io.loadmat(root_dir)
         self.mu_s = shape_data['mu_lm'].T
         self.mu_exp = shape_data['mu_exp'].T
         lm_eigenvec = shape_data['lm_eigenvec']
@@ -532,168 +542,69 @@ class MNLoader(Dataset):
         self.M = M
         self.N = N
 
-        # extra boundaries on camera coordinates
-        self.w = 640
-        self.h = 480
-        self.f = f
-        self.minf = 400; self.maxf = 1500
-        self.minz = 400; self.maxz = 3000;
-        self.max_rx = 20;
-        self.max_ry = 20; self.max_rz = 20;
-        self.xstd = 1; self.ystd = 1;
+        # get indices
+        indices = []
+        le = list(range(36,42)) + list(range(17,22))
+        re = list(range(42,48)) + list(range(22,27))
+        nose = list(range(27,36))
+        mouth = list(range(48,68))
+        jaw = list(range(0,17))
+        random.shuffle(le)
+        random.shuffle(re)
+        random.shuffle(nose)
+        random.shuffle(mouth)
+        random.shuffle(jaw)
+        lm = [le,re,nose,mouth,jaw]
+        for i in range(68):
+            idx = lm[i % len(lm)].pop()
+            indices.append(idx)
+            if len(lm[i % len(lm)]) == 0:
+                lm.pop(i % len(lm))
+        self.indices = indices
 
     def __len__(self):
-        return 1000
+
+        return len(self.files)
 
     def __getitem__(self,idx):
-        # data holders
-        M = self.M
-        N = self.N
-        x_w = np.zeros((N,3));
-        x_cam = np.zeros((M,N,3));
-        x_img = np.zeros((M,N,2));
-        x_img_true = np.zeros((M,N,2));
+        fname = self.files[idx]
+        data = scipy.io.loadmat(fname)
 
-        # define intrinsics
-        f = self.f;
-        K = np.array([[f,0,0],[ 0,f,0], [0,0,1]])
+        tmp = data['sequence'][0,0]
+        x_w = tmp['x_w']
+        x_img_gt = tmp['x_img_true']
+        x_cam = tmp['x_cam']
+        R = tmp['R']
+        T = tmp['T']
+        f = torch.Tensor(tmp['f'].astype(np.float)[0]).float()
+        d = np.mean(T[:,2])
 
-        # create random 3dmm shape
-        alpha = np.random.randn(199)*30
-        eigenvec = self.lm_eigenvec * self.sigma.T
-        s = np.matmul(self.lm_eigenvec,np.expand_dims(alpha,1))
-        s = s.reshape(-1,3)
-        shape = self.mu_s + s
-        x_w = shape
+        if self.addnoise:
+            le = x_img_gt[:,36,:]
+            re = x_img_gt[:,45,:]
+            std = np.max(np.linalg.norm(le - re,axis=1)*0.05)
+            noise = np.random.rand(self.M,self.N,2) * std
+        else:
+            noise = 0
 
-        # visualize 3dmm shape
-        #import pptk
-        #v = pptk.viewer(shape)
-        #v.set(point_size=0.3)
-        #quit()
+        x_img_gt = x_img_gt[:self.M,:self.N,:]
+        x_w = x_w[:self.N,:]
+        x_cam = x_cam[:self.M,:self.N]
+        x_img_gt[:,:,0] = x_img_gt[:,:,0] - 320
+        x_img_gt[:,:,1] = x_img_gt[:,:,1] - 240
+        x_img = x_img_gt + noise
+        x_img = x_img.reshape((self.M*self.N,2))
 
-        # create random 3dmm expression
-        #beta = np.random.randn(29) * 0.1
-        #e = np.sum(np.expand_dims(beta,0)*self.exp_eigenvec,1)
-        #exp = e.reshape(68,3)
-
-        # define depth
-        minz = self.minz
-        maxz = self.maxz
-
-        # get initial and final rotation
-        while True:
-            r_init, q_init = self.generateRandomRotation()
-            r_final, q_final = self.generateRandomRotation()
-            t_init = self.generateRandomTranslation(K,minz,maxz)
-            t_final = self.generateRandomTranslation(K,minz,maxz)
-
-            ximg_init = self.project2d(r_init,t_init,K,x_w)
-            ximg_final = self.project2d(r_final,t_final,K,x_w)
-            if np.any(np.amin(ximg_init,axis=0) < -320): continue
-            if np.any(np.amin(ximg_final,axis=0) < -320): continue
-            if np.any(np.amin(ximg_init,axis=1) < -240): continue
-            if np.any(np.amin(ximg_final,axis=1) < -240): continue
-            init = np.amax(ximg_init,axis=0)
-            final = np.amax(ximg_final,axis=0)
-            if init[0] > 320: continue
-            if final[0] > 320: continue
-            if init[1] > 240: continue
-            if final[1] > 240: continue
-            break
-        d = (t_init[2] + t_final[2]) / 2
-
-        # interpolate quaternion using spherical linear interpolation
-        qs = np.stack((q_init,q_final))
-        Rs = Rotation.from_quat(qs)
-        times = np.linspace(0,1,M)
-        slerper = Slerp([0,1],Rs)
-        rotations = slerper(times)
-        matrices = rotations.as_matrix()
-
-        T = np.stack((np.linspace(t_init[0],t_final[0],M),
-                np.linspace(t_init[1],t_final[1],M),
-                np.linspace(t_init[2],t_final[2],M))).T
-
-        x_cam = np.matmul(matrices,np.stack(M*[x_w.T])) + np.expand_dims(T,-1)
-        proj = np.matmul(np.stack(M*[K]),x_cam)
-        proj = proj / np.expand_dims(proj[:,2,:],1)
-        proj = proj.transpose(0,2,1)
-        x_img_true = proj[:,:,:2]
-
-        # add noise to x_img_true
-        noise = np.random.randn(M,N,2) * 3
-
-        x_img = x_img_true + noise
-        x_img = x_img.reshape((M*N,2))
-        #x_img_norm = (x_img - np.array([[320,240]])) / 320
-
-        # create dictionary for results
         sample = {}
-        #sample['beta_gt'] = torch.from_numpy(alpha).float()
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
-        sample['x_cam_gt'] = torch.from_numpy(x_cam).float()
+        sample['x_cam_gt'] = torch.from_numpy(x_cam).float().permute(0,2,1)
         sample['x_img'] = torch.from_numpy(x_img).float()
-        sample['x_img_gt'] = torch.from_numpy(x_img_true).float().permute(0,2,1)
-        sample['f_gt'] = torch.Tensor([f]).float()
-        #sample['x_img_norm'] = torch.from_numpy(x_img_norm).float()
-        #sample['K_gt'] = torch.from_numpy(K).float()
-        #sample['R_gt'] = torch.from_numpy(R).float()
-        #sample['Q_gt'] = torch.from_numpy(Q).float()
-        #sample['T_gt'] = torch.from_numpy(T).float()
+        sample['x_img_gt'] = torch.from_numpy(x_img_gt).float().permute(0,2,1)
+        sample['f_gt'] = torch.Tensor(f).float()
+        #sample['d_gt'] = torch.Tensor([d]).float()
+        #sample['T_gt'] = T
+
         return sample
-
-    def generateRandomRotation(self):
-
-        ax = self.max_rx;
-        ay = self.max_ry;
-        az = self.max_rz;
-        rx = np.random.random()*2*ax - ax;
-        ry = np.random.random()*2*ay - ay;
-        rz = np.random.random()*2*az - az;
-
-        r = Rotation.from_euler('zyx',[rz,ry,rx],degrees=True)
-        q = r.as_quat()
-
-        return r,q
-
-    def generateRandomTranslation(self,K,minz,maxz,w=640,h=480):
-
-        xvec = np.array([[w],[w/2],[1]])
-        yvec = np.array([[h/2],[h],[1]])
-        vz = np.array([[0],[0],[1]]);
-        vx = np.matmul(np.linalg.inv(K),xvec)
-        vy = np.matmul(np.linalg.inv(K),yvec)
-        vx = np.squeeze(vx)
-        vy = np.squeeze(vy)
-        vz = np.array([0,0,1])
-        thetax = np.arctan2(np.linalg.norm(np.cross(vz,vy)),np.dot(vz,vy));
-        thetay = np.arctan2(np.linalg.norm(np.cross(vz,vx)),np.dot(vz,vx));
-
-        tz = np.random.random()*(maxz-minz) + minz;
-        maxx = tz * np.tan(thetax);
-        maxy = tz * np.tan(thetay);
-        tx = np.random.random()*maxx*2 - maxx;
-        ty = np.random.random()*maxy*2 - maxy;
-        t = [tx,ty,tz];
-        return np.array(t)
-
-
-    def generateRandomTranslation2(self,K,deltaz,deltax,deltay,w=640,h=480):
-
-        return np.array(t)
-
-
-    def project2d(self,r,t,K,pw):
-
-        R = r.as_matrix()
-        xc = np.matmul(R,pw.T) + np.expand_dims(t,1);
-
-        proj = np.matmul(K,xc)
-        proj = proj / proj[2,:]
-        ximg = proj.T
-
-        return ximg
 
 class SyntheticLoaderFull(Dataset):
     def __init__(self):
@@ -920,7 +831,7 @@ class SyntheticLoader(Dataset):
         self.w = 640
         self.h = 480
         self.minf = 400; self.maxf = 1500
-        self.minz = 380; self.maxz = 3200;
+        self.minz = 800; self.maxz = 8000;
         self.max_rx = 20;
         self.max_ry = 20; self.max_rz = 20;
         self.xstd = 1; self.ystd = 1;
@@ -932,20 +843,20 @@ class SyntheticLoader(Dataset):
         # data holders
         M = self.M
         N = self.N
-        x_w = np.zeros((68,3));
-        x_cam = np.zeros((M,68,3));
-        x_img = np.zeros((M,68,2));
-        x_img_true = np.zeros((M,68,2));
+        x_w = np.zeros((N,3));
+        x_cam = np.zeros((M,N,3));
+        x_img = np.zeros((M,N,2));
+        x_img_true = np.zeros((M,N,2));
 
         # define intrinsics
         f = self.minf + random.random() * (self.maxf - self.minf);
         K = np.array([[f,0,0],[ 0,f,0], [0,0,1]])
 
         # create random 3dmm shape
-        alpha = np.random.randn(199,1) * 100
+        alpha = np.random.randn(199,1) * 5
         lm_eigenvec = np.matmul(self.lm_eigenvec,np.diag(self.sigma[:,0]))
         s = np.squeeze(np.matmul(lm_eigenvec,alpha))
-        s = s.reshape(68,3)
+        s = s.reshape(N,3)
         lm = self.mu_lm + s
         lm = lm - np.expand_dims(np.mean(lm,axis=0),axis=0)
 
@@ -958,7 +869,7 @@ class SyntheticLoader(Dataset):
         # create random 3dmm expression
         beta = np.random.randn(29) * 0.1
         e = np.sum(np.expand_dims(beta,0)*self.exp_eigenvec,1)
-        exp = e.reshape(68,3)
+        exp = e.reshape(N,3)
 
         # define depth
         tz = np.random.random() * (self.maxz-self.minz) + self.minz
@@ -990,7 +901,7 @@ class SyntheticLoader(Dataset):
         # interpolate quaternion using spherical linear interpolation
         qs = np.stack((q_init,q_final))
         Rs = Rotation.from_quat(qs)
-        times = np.linspace(0,1,100)
+        times = np.linspace(0,1,M)
         slerper = Slerp([0,1],Rs)
         rotations = slerper(times)
         matrices = rotations.as_matrix()
@@ -1009,7 +920,7 @@ class SyntheticLoader(Dataset):
         re = x_img_true[:,45,:]
         std = np.mean(np.linalg.norm(le - re,axis=1)*0.05)
 
-        noise = np.random.rand(100,68,2) * std
+        noise = np.random.rand(M,N,2) * std
 
         x_img = x_img_true + noise
         x_img = x_img.reshape((M*N,2))
@@ -1017,7 +928,7 @@ class SyntheticLoader(Dataset):
 
         # create dictionary for results
         sample = {}
-        #sample['beta_gt'] = torch.from_numpy(alpha).float()
+        sample['alpha_gt'] = torch.from_numpy(alpha).float()
         sample['x_w_gt'] = torch.from_numpy(x_w).float()
         sample['x_cam_gt'] = torch.from_numpy(x_cam).float()
         sample['x_img'] = torch.from_numpy(x_img).float()
@@ -1146,6 +1057,9 @@ class ToTensor(object):
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
+
+    loader = MNLoader(400)
+    quit()
 
     loader = AnalysisLoader()
     sample = loader[1]
