@@ -68,7 +68,7 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
         alpha = 1
     else:
         alpha = 0.001
-    alpha = 0.001
+    #alpha = 0.001
 
     # define what weights gets optimized
     calib_net.eval()
@@ -96,8 +96,8 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
     shape = shape - shape.mean(1).unsqueeze(1)
     shape = shape.mean(0)
 
-    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-4)
-    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1e-1)
+    opt1 = torch.optim.Adam(calib_net.parameters(),lr=1e-5)
+    opt2 = torch.optim.Adam(sfm_net.parameters(),lr=1)
     curloss = 100000
     for outerloop in itertools.count():
         shape = shape.detach()
@@ -122,7 +122,7 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
             error_s = util.getShapeError(ptsI,Xc,shape,f,R,T)
 
             # get 2D reprojection error
-            error2d = util.getError(ptsI,shape,R,T,K,show=False,loss='l2')
+            error2d = util.getError(ptsI,shape,R,T,K,show=False,loss='l1')
 
             # get relative depth error
             error3d = util.getDepthError(area,shape,R,T)
@@ -130,9 +130,9 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
             # apply loss
             #loss = error2d.mean()
             #loss = error2d.mean() + error3d
-            loss = error2d.mean() + error_time*alpha
+            #loss = error2d.mean() + error_time*alpha
             #loss = error_s + error2d.mean()
-            #loss = error_s
+            loss = error_s
             #loss = error_s + error_time*alpha
             #loss = error3d
 
@@ -181,7 +181,7 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
             error_s = util.getShapeError(ptsI,Xc,shape,f,R,T)
 
             # error2d
-            error2d = util.getError(ptsI,shape,R,T,K,show=False,loss='l2')
+            error2d = util.getError(ptsI,shape,R,T,K,show=False,loss='l1')
             #Xc = torch.bmm(R,torch.stack(M*[shape.T])) + T.unsqueeze(2)
 
             # get relative depth error
@@ -190,9 +190,9 @@ def dualoptimization(ptsI,calib_net,sfm_net,shape_gt=None,fgt=None,M=100,N=68,mo
             # apply loss
             #loss = error2d.mean()
             #loss = error2d.mean()+ error3d
-            loss = error2d.mean()+ error_time*alpha
+            #loss = error2d.mean()+ error_time*alpha
             #loss = error_s + error2d.mean()
-            #loss = error_s
+            loss = error_s
             #loss = error_s + error_time*alpha
             #loss = error3d
 
@@ -282,7 +282,7 @@ def testReal(modelin=args.model,outfile=args.out,optimize=args.opt,db=args.db):
         km,c_w,scaled_betas,alphas = util.EPnP_single(ptsI,shape,K)
         _, R, T, mask = util.optimizeGN(km,c_w,scaled_betas,alphas,shape,ptsI)
         error_time = util.getTimeConsistency(shape,R,T)
-        if error_time > 30:
+        if error_time > 20:
             mode='walk'
         else:
             mode='still'

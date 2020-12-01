@@ -79,7 +79,7 @@ class TestLoader(Dataset):
             root_dir = os.path.join("../data0/synthetic_3dface",f"sequencef{f:04d}")
         self.root_dir = root_dir
         self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
-        self.files.sort()
+        self.files = sorted(self.files,key=str.lower)
         self.addnoise = addnoise
 
     def __len__(self):
@@ -132,7 +132,7 @@ class Cad60Loader(Dataset):
         else:
             self.root_dir = os.path.join("../data0/tmp/cad60/processed")
         files = os.listdir(self.root_dir)
-        files.sort()
+        sorted(files,key=str.lower)
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
 
@@ -172,7 +172,7 @@ class Cad120Loader(Dataset):
             self.root_dir = os.path.join("../data0/tmp/cad120/processed")
             shape_dir = "../data/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
         files = os.listdir(self.root_dir)
-        files.sort()
+        files = sorted(files,key=str.lower)
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
 
@@ -211,7 +211,10 @@ class Human36Loader(Dataset):
         else:
             self.root_dir = os.path.join("../data0/tmp/human36/processed")
         files = os.listdir(self.root_dir)
+        #files = sorted(files,key=str.lower)
         files.sort()
+        print(files[22])
+        quit()
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
 
@@ -252,9 +255,12 @@ class BIWIIDLoader(Dataset):
         else:
             self.root_dir = os.path.join("../data0/tmp/biwi-i/processed")
         files = os.listdir(self.root_dir)
-        files.sort()
+        #files = sorted(files,key=str.lower)
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
+        files.sort()
+        print(files[8])
+        quit()
 
     def __len__(self):
 
@@ -292,7 +298,7 @@ class BIWILoader(Dataset):
             self.root_dir = os.path.join("../data0/tmp/biwi/processed")
             self.shape_dir = os.path.join("../data0/tmp/biwi/shape")
         files = os.listdir(self.root_dir)
-        files.sort()
+        files = sorted(files,key=str.lower)
 
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
         self.maxangle = 20
@@ -320,18 +326,17 @@ class BIWILoader(Dataset):
         N = x2d.shape[1]
 
         # find valid views
-        validview = []
-        for i in range(M):
-            r = Rotation.from_matrix(R[i])
-            angles = r.as_euler('zyx',degrees=False)
-            angles = np.arcsin(np.sin(angles)) * 180 / np.pi
-            if np.any(np.abs(angles) > self.maxangle): continue
-            else: validview.append(i)
-
-        x2d = x2d[validview]
-        xcam = xcam[validview]
-        M = x2d.shape[0]
-        N = x2d.shape[1]
+        #validview = []
+        #for i in range(M):
+        #    r = Rotation.from_matrix(R[i])
+        #    angles = r.as_euler('zyx',degrees=False)
+        #    angles = np.arcsin(np.sin(angles)) * 180 / np.pi
+        #    if np.any(np.abs(angles) > self.maxangle): continue
+        #    else: validview.append(i)
+        #x2d = x2d[validview]
+        #xcam = xcam[validview]
+        #M = x2d.shape[0]
+        #N = x2d.shape[1]
 
         pts = x2d.reshape((M*N,2))
         x2d = np.transpose(x2d,(0,2,1))
@@ -357,9 +362,8 @@ class AnalysisLoader(Dataset):
             shape_dir = "../data0/face_alignment/300W_LP/Code/ModelGeneration/shape_simple.mat"
             self.shape_dir = os.path.join("../data0/tmp/biwi/shape")
         subjects = [f"{sub:02d}" for sub in range(1,25)]
-
         files = os.listdir(self.root_dir)
-        files.sort()
+        files = sorted(files,key=str.lower)
         self.all_paths = [os.path.join(self.root_dir,f) for f in files]
 
         shape_data = scipy.io.loadmat(shape_dir)
@@ -503,7 +507,7 @@ class MNLoader(Dataset):
         random.seed(seed)
         self.root_dir = root_dir
         self.files = [os.path.join(root_dir,f) for f in os.listdir(root_dir)]
-        self.files.sort()
+        self.files = sorted(self.files,key=str.lower)
         self.addnoise = addnoise
 
         #self.transform = transforms.Compose([ToTensor()])
